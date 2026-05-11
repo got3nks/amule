@@ -13,6 +13,11 @@
 /* Define if upnp was found. */
 #cmakedefine ENABLE_UPNP
 
+/* Define to enable NAT-T + uTP for LowID-to-LowID transfers. Phase B+
+   of the NAT-T port (see .archive/eMuleAI-nat-t-implementation-plan.md);
+   OFF by default until the implementation is complete. */
+#cmakedefine ENABLE_NAT_T
+
 /* Define to 1  if translation of program messages to the user's
    native language is requested. */
 #cmakedefine ENABLE_NLS 1

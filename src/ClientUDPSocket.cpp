@@ -103,6 +103,31 @@ void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer,
 					}
 					break;
 
+#ifdef ENABLE_NAT_T
+				case OP_UDPRESERVEDPROT2:
+					// NAT-T / uTP envelope: OP_UDPRESERVEDPROT2 (0xB2)
+					// carries either a uTP frame (sub-byte 0x00) or a
+					// Key Frame (sub-byte 0xFF) used to bootstrap
+					// encryption keying before the first uTP SYN.
+					// Phase B0 stub: the dispatch is wired here so that
+					// later phases (B1+) can drop in the handlers
+					// without re-modifying the switch. For now we drop
+					// silently with a debug log; vanilla aMule peers
+					// that don't define ENABLE_NAT_T fall through to
+					// the default "Unknown opcode" branch, which is
+					// the correct interop behavior (vanilla drops the
+					// packet, no harm done).
+					if (packetLen >= 2) {
+						uint8_t natSubByte = decryptedBuffer[1];
+						AddDebugLogLineN(logClientUDP, CFormat(
+							"NAT-T: received OP_UDPRESERVEDPROT2 from %s, "
+							"sub=0x%02x len=%d (handler stub — Phase B0)")
+							% Uint32_16toStringIP_Port(ip, port)
+							% (unsigned)natSubByte % packetLen);
+					}
+					break;
+#endif // ENABLE_NAT_T
+
 				case OP_KADEMLIAPACKEDPROT:
 					theStats::AddDownOverheadKad(length);
 					if (packetLen >= 2) {
