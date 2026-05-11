@@ -209,3 +209,11 @@ ENDIF (WIN32)
 if (NEED_LIB_MULEAPPCOMMON OR BUILD_WEBSERVER)
 	option (ENABLE_UPNP "enable UPnP support in aMule" ON)
 endif()
+
+# NAT-T (Simple Traversal of UDP through NATs) + uTP support enables
+# LowID-to-LowID transfers via UDP hole-punching. Currently behind an
+# OFF-by-default option while the feature is being ported phase by
+# phase from eMuleAI (see .archive/eMuleAI-nat-t-implementation-plan.md).
+# When OFF (the default) the libutp library is not built and no NAT-T
+# code is included — preserving the existing build surface bit for bit.
+option (ENABLE_NAT_T "enable NAT-T + uTP for LowID-to-LowID transfers (experimental)" OFF)

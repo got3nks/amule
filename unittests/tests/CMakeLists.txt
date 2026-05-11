@@ -190,3 +190,26 @@ target_include_directories (TextFileTest
 target_link_libraries (TextFileTest
 	muleunit
 )
+
+# Phase A1 of the NAT-T port: smoke-test that the vendored libutp at utp/
+# builds and links. Only compiled when ENABLE_NAT_T=YES; if NAT-T is off
+# the utp target doesn't exist, so this test is omitted from the suite.
+if (ENABLE_NAT_T)
+	add_executable (LibUtpLinkTest
+		LibUtpLinkTest.cpp
+	)
+
+	add_test (NAME LibUtpLinkTest
+		COMMAND LibUtpLinkTest
+	)
+
+	target_include_directories (LibUtpLinkTest
+		PRIVATE ${CMAKE_SOURCE_DIR}/src
+		PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+	)
+
+	target_link_libraries (LibUtpLinkTest
+		muleunit
+		utp
+	)
+endif()
