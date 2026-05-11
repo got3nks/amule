@@ -233,3 +233,25 @@ target_include_directories (NatTraversalTest
 target_link_libraries (NatTraversalTest
 	muleunit
 )
+
+# Phase A2 of the NAT-T port: cross-platform network-introspection shim
+# (PMTU + best-interface discovery). Self-tests against the loopback
+# interface — no internet required. Compiled unconditionally; the
+# Windows stub still produces meaningful assertions for that platform.
+add_executable (NetworkInfoTest
+	NetworkInfoTest.cpp
+	${CMAKE_SOURCE_DIR}/src/NetworkInfo.cpp
+)
+
+add_test (NAME NetworkInfoTest
+	COMMAND NetworkInfoTest
+)
+
+target_include_directories (NetworkInfoTest
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (NetworkInfoTest
+	muleunit
+)
