@@ -897,7 +897,14 @@ void CClientList::RequestBuddy(Kademlia::CContact* contact, uint8_t connectOptio
 	uint8_t ID[16];
 	contact->GetClientID().ToByteArray(ID);
 	pNewClient->SetUserHash(CMD4Hash(ID));
-	pNewClient->SetConnectOptions(connectOptions, true, false);
+	// Phase D5a: pass natTraversal=true so bit 7 of connectOptions
+	// (CONNECT_OPT_BIT_NAT_TRAVERSAL = 0x80) is captured on the
+	// buddy's m_fSupportsNatTraversal. KADEMLIA_FINDBUDDY_RES is a
+	// Hello-style handshake (Phase A3 context distinction), so bit 7
+	// means NAT-T support, not "hash follows". The bit is what lets
+	// the NatTraversalCoordinator's FindBuddy thunk pick this buddy
+	// as a rendezvous relay candidate.
+	pNewClient->SetConnectOptions(connectOptions, true, false, true);
 	AddToKadList(pNewClient);
 	//This method checks if this is a dup already.
 	AddClient(pNewClient);

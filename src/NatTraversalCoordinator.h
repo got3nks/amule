@@ -280,6 +280,23 @@ private:
 	bool                                    m_our_user_hash_set = false;
 };
 
+// Phase D5a: install the production thunks (defined in
+// NatTraversalCoordinatorProduction.cpp) on the singleton
+// coordinator. Wires LookupClientByHash → CClientList,
+// LookupClientByEndpoint → CDownloadQueue / CUploadQueue,
+// SendEmuleProt → CClientUDPSocket::SendPacket, FindBuddy →
+// CClientList::GetBuddy (D5a single-buddy; D5b extends to
+// served-buddy iterator), CreateUtpLayer → new CUtpLayer +
+// Connect against UtpEnvironment's context. Also publishes the
+// process-level user hash from thePrefs::GetUserHash().
+//
+// Called once at daemon startup from CClientUDPSocket's ctor,
+// next to UtpEncryption::InstallProductionDelegates (B6) and
+// UtpTimer::Start (B7). Tests deliberately do NOT call this —
+// they install their own lightweight stubs via the individual
+// CNatTraversalCoordinator::SetXxxDelegate methods.
+void InstallNatTraversalCoordinatorProductionDelegates();
+
 } // namespace NatTraversal
 
 #endif // ENABLE_NAT_T

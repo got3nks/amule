@@ -46,6 +46,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		PartFileHashThread.cpp
 		ThreadTasks.cpp
 		NatTraversalCoordinator.cpp
+		NatTraversalCoordinatorProduction.cpp
 		UtpCallbacks.cpp
 		UtpEncryption.cpp
 		UtpEncryptionProduction.cpp

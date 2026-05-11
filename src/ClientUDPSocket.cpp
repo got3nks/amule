@@ -52,6 +52,7 @@
 #include "EncryptedDatagramSocket.h"
 #include "NatTraversal.h"
 #ifdef ENABLE_NAT_T
+#include "NatTraversalCoordinator.h"
 #include "UtpEncryption.h"
 #include "UtpEnvironment.h"
 #include "UtpKeyFrame.h"
@@ -105,6 +106,15 @@ CClientUDPSocket::CClientUDPSocket(const amuleIPV4Address& address, const CProxy
 	// is a no-op). If utp_init failed above, the tick safely no-ops
 	// each iteration (GetContext() returns NULL).
 	UtpTimer::Start();
+
+	// Phase D5a: install the NAT-T coordinator's production
+	// delegates — LookupClientByHash → CClientList, LookupByEndpoint
+	// → CDownloadQueue / CUploadQueue, SendEmuleProt →
+	// CClientUDPSocket::SendPacket, FindBuddy → CClientList::GetBuddy
+	// (single-buddy mode in D5a; D5b adds the served-buddy iterator),
+	// CreateUtpLayer → new CUtpLayer + Connect. Publishes the
+	// process-level user hash from thePrefs.
+	NatTraversal::InstallNatTraversalCoordinatorProductionDelegates();
 #endif
 }
 
