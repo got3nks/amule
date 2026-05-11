@@ -163,4 +163,16 @@ bool DecodeHolePunch(const std::uint8_t* buf, std::size_t /*len*/)
 	return true;
 }
 
+// Phase C3 stub. Phase D's rendezvous coordinator owns the actual
+// Kad search and the SupportsNatTraversal filter. Leaving this empty
+// for now means the coordinator (when it arrives) has a clean
+// surface to fill in; today, no callers exist outside future tests.
+bool FindRendezvousCandidates(const std::uint8_t* /*target_user_hash*/,
+                              std::size_t /*max_candidates*/,
+                              std::vector<RendezvousCandidate>& out)
+{
+	out.clear();
+	return false;
+}
+
 } // namespace NatTraversal

@@ -184,6 +184,51 @@ bool EncodeHolePunch(std::vector<std::uint8_t>& out);
 // empty or trailing-padding-tolerant); returns false on NULL buf.
 bool DecodeHolePunch(const std::uint8_t* buf, std::size_t len);
 
+// --- Phase C3 scaffolding: Kad rendezvous-buddy discovery ----------
+//
+// A NAT-T initiator needs at least one HighID peer that can act as
+// a rendezvous buddy — relay the RENDEZVOUS packet to a LowID
+// uploader on the initiator's behalf and follow with HOLEPUNCH back
+// to the initiator. The buddy must be:
+//   (a) HighID (directly reachable on UDP), and
+//   (b) advertise NAT-T support (the SupportsNatTraversal bit from
+//       NatTraversal::CONNECT_OPT_BIT_NAT_TRAVERSAL).
+//
+// Finding such a buddy is a two-step process: standard Kad search
+// for peers near the target user's hash, then filter for NAT-T
+// support. This API surface mirrors what the plan's cluster 7 spec
+// (FindRendezvousCandidates) called for.
+//
+// **Phase C3 scope**: this header DECLARES the API; the
+// implementation in NatTraversal.cpp is a documented stub that
+// returns no candidates. The actual Kad-search wiring lands inside
+// Phase D's rendezvous coordinator (cluster 8) — bundled together
+// because the coordinator is the only caller and the search policy
+// (timeouts, retry, candidate-cap interaction) is coordinator-
+// specific. The stub exists so callers can be written against the
+// final API shape today.
+
+struct RendezvousCandidate {
+	std::uint8_t  user_hash[kUserHashSize]; // candidate's user hash
+	std::uint32_t ip_be;                    // network byte order
+	std::uint16_t udp_port;                 // host byte order
+	std::uint16_t tcp_port;                 // host byte order
+};
+
+// Synchronous, fast variant: snapshots whatever candidates are
+// currently known (from existing Kad routing tables / known-client
+// state, or empty if no integration has happened yet). The caller
+// supplies a max cap; the implementation appends up to that many to
+// `out`. Returns true if at least one candidate was found.
+//
+// Today's stub always returns false with `out` left empty — Phase D
+// fills in the actual Kad search against
+// `Kademlia::CKademlia::GetRoutingZone()` plus a SupportsNatTraversal
+// filter.
+bool FindRendezvousCandidates(const std::uint8_t target_user_hash[kUserHashSize],
+                              std::size_t max_candidates,
+                              std::vector<RendezvousCandidate>& out);
+
 } // namespace NatTraversal
 
 #endif // NATTRAVERSAL_H
