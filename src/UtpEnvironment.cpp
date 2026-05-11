@@ -24,6 +24,8 @@
 
 #include <utp.h>
 
+#include "UtpCallbacks.h"
+
 namespace UtpEnvironment {
 
 namespace {
@@ -54,6 +56,14 @@ utp_context* Init()
 	// be tolerant of that — running without NAT-T is a degraded but
 	// valid mode.
 	g_context = utp_init(2);
+	if (g_context != NULL) {
+		// Phase B2: register the five required callbacks immediately so
+		// the context is fully wired before any utp_create_socket /
+		// utp_process_udp call has a chance to fire. InstallOnContext
+		// only returns false on a NULL context — defensively check for
+		// completeness, but we just confirmed non-NULL above.
+		UtpCallbacks::InstallOnContext(g_context);
+	}
 	return g_context;
 }
 

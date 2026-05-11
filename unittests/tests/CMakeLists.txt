@@ -266,6 +266,7 @@ target_link_libraries (NetworkInfoTest
 add_executable (UtpEnvironmentTest
 	UtpEnvironmentTest.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
 )
 
 add_test (NAME UtpEnvironmentTest
@@ -284,6 +285,37 @@ target_link_libraries (UtpEnvironmentTest
 
 if (ENABLE_NAT_T)
 	target_link_libraries (UtpEnvironmentTest
+		utp
+	)
+endif()
+
+# Phase B2 of the NAT-T port: libutp callback implementations. The
+# test creates its own utp_context (not via UtpEnvironment) so the
+# install/sendto-delegate flow can be exercised in isolation without
+# tearing down the singleton state across tests. When ENABLE_NAT_T=OFF
+# the test compiles to a single tautological case and skips the libutp
+# link, matching UtpEnvironmentTest's pattern.
+add_executable (UtpCallbacksTest
+	UtpCallbacksTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+)
+
+add_test (NAME UtpCallbacksTest
+	COMMAND UtpCallbacksTest
+)
+
+target_include_directories (UtpCallbacksTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpCallbacksTest
+	muleunit
+)
+
+if (ENABLE_NAT_T)
+	target_link_libraries (UtpCallbacksTest
 		utp
 	)
 endif()

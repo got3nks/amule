@@ -44,6 +44,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		PartFileWriteThread.cpp
 		PartFileHashThread.cpp
 		ThreadTasks.cpp
+		UtpCallbacks.cpp
 		UtpEnvironment.cpp
 	)
 endif()
