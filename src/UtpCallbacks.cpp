@@ -24,6 +24,8 @@
 
 #include <utp.h>
 
+#include "UtpLayer.h"
+
 namespace UtpCallbacks {
 
 namespace {
@@ -67,10 +69,18 @@ uint64_t on_state_change(utp_callback_arguments* a)
 	//            context-level events, defensively check).
 	// a->state:  one of UTP_STATE_CONNECT / WRITABLE / EOF / DESTROYING.
 	//
-	// Phase B2 stub: log only. B3 dispatches to CUtpLayer via
-	// utp_get_userdata(a->socket) (the layer registers itself there
-	// when it creates a libutp socket).
-	(void)a;
+	// Phase B3: dispatch to CUtpLayer via utp_get_userdata(a->socket).
+	// A NULL userdata means either (a) the socket was created outside
+	// a CUtpLayer (e.g. in a test that exercises just the callback
+	// wiring), or (b) the layer detached itself before close. Either
+	// way, we silently skip.
+	if (a == NULL || a->socket == NULL) {
+		return 0;
+	}
+	CUtpLayer* layer = static_cast<CUtpLayer*>(utp_get_userdata(a->socket));
+	if (layer != NULL) {
+		layer->OnStateChange(a->state);
+	}
 	return 0;
 }
 
@@ -79,13 +89,18 @@ uint64_t on_read(utp_callback_arguments* a)
 	// a->socket: source socket
 	// a->buf, a->len: payload bytes libutp has accumulated for us
 	//
-	// We MUST call utp_read_drained at the end to tell libutp the
-	// bytes were consumed; otherwise libutp will keep replaying the
-	// same buffer and stall the read side. B3 will push the bytes
-	// into the CUtpLayer's read queue; for B2 we just drain so the
-	// libutp state machine progresses (important if a test wires up
-	// a peer pair against an unconfigured stub layer).
-	if (a != NULL && a->socket != NULL) {
+	// Phase B3: dispatch to CUtpLayer, which copies the bytes into
+	// its read buffer and calls utp_read_drained itself. If no layer
+	// is attached we must still drain so the libutp state machine
+	// progresses (otherwise libutp would replay the same buffer
+	// and stall the read side).
+	if (a == NULL || a->socket == NULL) {
+		return 0;
+	}
+	CUtpLayer* layer = static_cast<CUtpLayer*>(utp_get_userdata(a->socket));
+	if (layer != NULL) {
+		layer->OnRead(a->buf, a->len);
+	} else {
 		utp_read_drained(a->socket);
 	}
 	return 0;
@@ -119,20 +134,35 @@ uint64_t on_error(utp_callback_arguments* a)
 	// a->socket: the connection that errored
 	// a->error_code: UTP_ECONNREFUSED / UTP_ECONNRESET / UTP_ETIMEDOUT
 	//
-	// Phase B2 stub: log only. B3 dispatches to CUtpLayer to mark the
-	// layer as dead so CUpDownClient (later) can clean up.
-	(void)a;
+	// Phase B3: dispatch to CUtpLayer so it can mark itself closed.
+	if (a == NULL || a->socket == NULL) {
+		return 0;
+	}
+	CUtpLayer* layer = static_cast<CUtpLayer*>(utp_get_userdata(a->socket));
+	if (layer != NULL) {
+		layer->OnError(a->error_code);
+	}
 	return 0;
 }
 
-uint64_t on_get_read_buffer_size(utp_callback_arguments* /*a*/)
+uint64_t on_get_read_buffer_size(utp_callback_arguments* a)
 {
 	// libutp asks how much app-side buffer space remains for inbound
 	// data. Returning 0 would tell libutp to stall the sender (apply
 	// backpressure). Returning the full advertised buffer keeps the
-	// flow open. B3 will query the per-socket CUtpLayer for its real
-	// remaining capacity; until then we publish a constant ceiling.
-	return (uint64_t)kDefaultReadBufferSize;
+	// flow open.
+	//
+	// Phase B3: when a CUtpLayer is attached, query its real
+	// remaining capacity. With no layer (test setups, pre-B4 traffic
+	// before key-frame exchange wires up a layer) fall back to the
+	// kDefaultReadBufferSize constant — same as the Phase B2 behavior.
+	if (a != NULL && a->socket != NULL) {
+		CUtpLayer* layer = static_cast<CUtpLayer*>(utp_get_userdata(a->socket));
+		if (layer != NULL) {
+			return static_cast<uint64_t>(layer->OnGetReadBufferSize());
+		}
+	}
+	return static_cast<uint64_t>(kDefaultReadBufferSize);
 }
 
 } // anonymous namespace

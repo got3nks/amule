@@ -267,6 +267,7 @@ add_executable (UtpEnvironmentTest
 	UtpEnvironmentTest.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
 )
 
 add_test (NAME UtpEnvironmentTest
@@ -298,6 +299,8 @@ endif()
 add_executable (UtpCallbacksTest
 	UtpCallbacksTest.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 )
 
 add_test (NAME UtpCallbacksTest
@@ -316,6 +319,41 @@ target_link_libraries (UtpCallbacksTest
 
 if (ENABLE_NAT_T)
 	target_link_libraries (UtpCallbacksTest
+		utp
+	)
+endif()
+
+# Phase B3 of the NAT-T port: CUtpLayer — per-connection wrapper
+# around a utp_socket with its 16 KiB write buffer + 64 KiB read
+# buffer. The test exercises buffer-capacity, FIFO ordering,
+# short-write semantics, close behavior, and the OnXxx callback paths
+# WITHOUT bringing up a real wire connection — Phase B6/B8 cover that.
+# UtpLayer.cpp depends on UtpEnvironment.cpp (for RuntimeLock) and on
+# UtpCallbacks.cpp (transitively through nothing at link time, but
+# kept consistent for the linker's sake).
+add_executable (UtpLayerTest
+	UtpLayerTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+)
+
+add_test (NAME UtpLayerTest
+	COMMAND UtpLayerTest
+)
+
+target_include_directories (UtpLayerTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpLayerTest
+	muleunit
+)
+
+if (ENABLE_NAT_T)
+	target_link_libraries (UtpLayerTest
 		utp
 	)
 endif()

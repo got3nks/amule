@@ -46,6 +46,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		ThreadTasks.cpp
 		UtpCallbacks.cpp
 		UtpEnvironment.cpp
+		UtpLayer.cpp
 	)
 endif()
 
