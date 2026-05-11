@@ -572,3 +572,26 @@ target_include_directories (NatTraversalRendezvousTest
 target_link_libraries (NatTraversalRendezvousTest
 	muleunit
 )
+
+# Phase D1 of the NAT-T port: NatTraversalCoordinator skeleton.
+# The pending-rendezvous table + timeout management is testable in
+# isolation; D2/D3/D4 role-specific behavior arrives in subsequent
+# sub-commits with their own tests.
+add_executable (NatTraversalCoordinatorTest
+	NatTraversalCoordinatorTest.cpp
+	${CMAKE_SOURCE_DIR}/src/NatTraversalCoordinator.cpp
+)
+
+add_test (NAME NatTraversalCoordinatorTest
+	COMMAND NatTraversalCoordinatorTest
+)
+
+target_include_directories (NatTraversalCoordinatorTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (NatTraversalCoordinatorTest
+	muleunit
+)
