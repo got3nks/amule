@@ -122,9 +122,50 @@ public:
 		std::uint32_t dest_ip_host,
 		std::uint16_t dest_udp_port);
 
+	// Find a HighID NAT-T-capable buddy to relay our OP_RENDEZVOUS
+	// through. Today's D3 implementation calls this once per
+	// RequestRendezvous; D5's Kad-search wiring will replace this
+	// with a multi-candidate iterator. Returns true if a buddy is
+	// available; out args filled with the buddy's UDP endpoint.
+	using FindBuddyFn = bool (*)(std::uint32_t& out_buddy_ip_host,
+	                             std::uint16_t& out_buddy_udp_port);
+
+	// Factory for CUtpLayer instances. Production wires this to
+	// `new CUtpLayer(UtpEnvironment::GetContext())` + Connect();
+	// tests install a stub that returns a sentinel pointer so the
+	// coordinator's bookkeeping can be exercised without standing
+	// up a full utp_context + delegate environment.
+	//
+	// `initiator` selects the connect flow (mirrors
+	// CUtpLayer::Connect's parameter): true for the D3 requester
+	// path (we initiate the uTP handshake), false for the D4
+	// endpoint path (we accept libutp's incoming SYN).
+	//
+	// Returns a pointer the callback receives via on_complete; the
+	// caller takes ownership and is responsible for deleting it. A
+	// NULL return indicates the factory failed (e.g.
+	// `utp_create_socket` allocation failure), in which case the
+	// coordinator fires on_complete(false, nullptr) on D3 and
+	// silently drops on D4 (no callback to fire on the responder
+	// path).
+	using CreateUtpLayerFn = CUtpLayer* (*)(
+		const std::uint8_t our_hash[kUserHashSize],
+		const std::uint8_t peer_hash[kUserHashSize],
+		const struct sockaddr* peer_addr,
+		socklen_t addr_len,
+		bool initiator);
+
 	void SetLookupClientByHashDelegate(LookupClientByHashFn fn);
 	void SetLookupClientByEndpointDelegate(LookupClientByEndpointFn fn);
 	void SetSendEmuleProtDelegate(SendEmuleProtFn fn);
+	void SetFindBuddyDelegate(FindBuddyFn fn);
+	void SetCreateUtpLayerDelegate(CreateUtpLayerFn fn);
+
+	// Set the process-level user hash. Production calls this once
+	// at startup (from thePrefs::GetUserHash()); tests set per-case.
+	// Used as the `our_hash` when creating outgoing CUtpLayer
+	// instances on the requester side.
+	void SetOurUserHash(const std::uint8_t our_hash[kUserHashSize]);
 
 	// === LowID requester role (D3, this method is D1 stub) =========
 	//
@@ -200,6 +241,17 @@ private:
 		std::vector<std::uint8_t> target_addr;     // sockaddr_storage bytes
 		socklen_t                target_addr_len;
 		RendezvousCompleteFn     on_complete;
+		// D3: track which buddy we sent OP_RENDEZVOUS to so we can
+		// match inbound OP_HOLEPUNCH by source against the right
+		// pending entry. Multiple concurrent rendezvous through
+		// different buddies are routed by source IP/port match.
+		std::uint32_t            buddy_ip_host;
+		std::uint16_t            buddy_udp_port;
+		// D3: hash key copy + our_hash captured at request time so
+		// OnInboundHolePunch can construct the CUtpLayer without
+		// re-deriving them.
+		std::array<std::uint8_t, kUserHashSize> peer_user_hash;
+		std::array<std::uint8_t, kUserHashSize> our_user_hash;
 	};
 
 	// Pending-rendezvous index keyed on target user hash. A
@@ -218,6 +270,14 @@ private:
 	LookupClientByHashFn     m_lookup_by_hash     = nullptr;
 	LookupClientByEndpointFn m_lookup_by_endpoint = nullptr;
 	SendEmuleProtFn          m_send_emule_prot    = nullptr;
+	FindBuddyFn              m_find_buddy         = nullptr;
+	CreateUtpLayerFn         m_create_utp_layer   = nullptr;
+
+	// Process-level user hash, set via SetOurUserHash. Zero until
+	// first set — D3 RequestRendezvous fires failure if our_hash
+	// hasn't been provisioned.
+	std::array<std::uint8_t, kUserHashSize> m_our_user_hash{};
+	bool                                    m_our_user_hash_set = false;
 };
 
 } // namespace NatTraversal

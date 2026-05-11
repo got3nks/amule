@@ -50,6 +50,32 @@ END_DECLARE;
 
 namespace {
 
+// File-scope mock for FindBuddyFn: a fixed (ip, port) the tests
+// can override. install_d1_baseline / install_d3_baseline below
+// pre-populate this so RequestRendezvous always finds a buddy.
+std::uint32_t g_mock_buddy_ip   = 0;
+std::uint16_t g_mock_buddy_port = 0;
+bool          g_mock_buddy_available = false;
+
+bool mock_find_buddy(std::uint32_t& out_ip, std::uint16_t& out_port)
+{
+	if (!g_mock_buddy_available) return false;
+	out_ip = g_mock_buddy_ip;
+	out_port = g_mock_buddy_port;
+	return true;
+}
+
+// File-scope no-op SendEmuleProt for D1 tests that don't care about
+// outbound packets. D2/D3 tests install their own capture-recording
+// version.
+bool noop_send_emule_prot(std::uint8_t /*opcode*/,
+                          const std::uint8_t* /*body*/, std::size_t /*body_len*/,
+                          std::uint32_t /*dest_ip*/,
+                          std::uint16_t /*dest_port*/)
+{
+	return true;
+}
+
 sockaddr_in MakeAddr(std::uint32_t ip, std::uint16_t port)
 {
 	sockaddr_in s;
@@ -67,6 +93,39 @@ void fill_hash(std::uint8_t hash[NatTraversal::kUserHashSize], std::uint8_t base
 	}
 }
 
+// Install the minimum set of delegates needed for D3
+// RequestRendezvous to succeed (our_hash + find_buddy +
+// send_emule_prot). Used by D1 tests that just want the
+// pending-entry bookkeeping path to work without testing the D3
+// state machine itself.
+void install_d1_baseline()
+{
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.ClearPendingForTesting();
+
+	std::uint8_t our_hash[NatTraversal::kUserHashSize];
+	fill_hash(our_hash, 0x77);
+	coord.SetOurUserHash(our_hash);
+
+	g_mock_buddy_available = true;
+	g_mock_buddy_ip        = 0xDEADBEEFu;
+	g_mock_buddy_port      = 4242;
+	coord.SetFindBuddyDelegate(&mock_find_buddy);
+	coord.SetSendEmuleProtDelegate(&noop_send_emule_prot);
+}
+
+void teardown_baseline()
+{
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.SetFindBuddyDelegate(nullptr);
+	coord.SetSendEmuleProtDelegate(nullptr);
+	coord.SetCreateUtpLayerDelegate(nullptr);
+	coord.SetLookupClientByHashDelegate(nullptr);
+	coord.SetOurUserHash(nullptr);
+	coord.ClearPendingForTesting();
+	g_mock_buddy_available = false;
+}
+
 } // anonymous namespace
 
 
@@ -75,8 +134,8 @@ void fill_hash(std::uint8_t hash[NatTraversal::kUserHashSize], std::uint8_t base
 // — D3 — or timeout).
 TEST(NatTraversalCoordinator, RequestRendezvousAddsToPending)
 {
+	install_d1_baseline();
 	auto& coord = CNatTraversalCoordinator::Instance();
-	coord.ClearPendingForTesting();
 	ASSERT_EQUALS((std::size_t)0, coord.PendingCount());
 
 	std::uint8_t target_hash[NatTraversal::kUserHashSize];
@@ -95,7 +154,7 @@ TEST(NatTraversalCoordinator, RequestRendezvousAddsToPending)
 	// Callback must NOT have fired yet — request is pending.
 	ASSERT_EQUALS(0, callback_fires.load());
 
-	coord.ClearPendingForTesting();
+	teardown_baseline();
 }
 
 
@@ -103,8 +162,8 @@ TEST(NatTraversalCoordinator, RequestRendezvousAddsToPending)
 // previous one — the previous callback fires with (false, nullptr).
 TEST(NatTraversalCoordinator, SecondRequestCancelsPreviousCallback)
 {
+	install_d1_baseline();
 	auto& coord = CNatTraversalCoordinator::Instance();
-	coord.ClearPendingForTesting();
 
 	std::uint8_t target_hash[NatTraversal::kUserHashSize];
 	fill_hash(target_hash, 0xA0);
@@ -143,8 +202,8 @@ TEST(NatTraversalCoordinator, SecondRequestCancelsPreviousCallback)
 // and the callback fires with (false, nullptr).
 TEST(NatTraversalCoordinator, PendingEntryTimesOutAfterDeadline)
 {
+	install_d1_baseline();
 	auto& coord = CNatTraversalCoordinator::Instance();
-	coord.ClearPendingForTesting();
 
 	std::uint8_t target_hash[NatTraversal::kUserHashSize];
 	fill_hash(target_hash, 0xA0);
@@ -194,8 +253,8 @@ TEST(NatTraversalCoordinator, PendingEntryTimesOutAfterDeadline)
 // callback fires once.
 TEST(NatTraversalCoordinator, MultiplePendingExpireIndependently)
 {
+	install_d1_baseline();
 	auto& coord = CNatTraversalCoordinator::Instance();
-	coord.ClearPendingForTesting();
 
 	std::atomic<int> fires_a(0);
 	std::atomic<int> fires_b(0);
@@ -416,6 +475,358 @@ TEST(NatTraversalCoordinator, BuddyDropsRendezvousForUnknownTarget)
 }
 
 
+// === Phase D3 — LowID requester role tests ======================
+
+namespace {
+
+// File-scope CreateUtpLayer mock + capture for D3 tests. Returns a
+// non-null sentinel pointer; tests check the callback receives it
+// to confirm the factory was invoked with the right args.
+CUtpLayer* const kSentinelLayer = reinterpret_cast<CUtpLayer*>(0x1234);
+
+struct CreateLayerCapture {
+	int call_count = 0;
+	std::vector<std::uint8_t> last_our_hash;
+	std::vector<std::uint8_t> last_peer_hash;
+	std::uint32_t             last_peer_ip   = 0;
+	std::uint16_t             last_peer_port = 0;
+	bool                      last_initiator = false;
+};
+CreateLayerCapture g_create_layer_capture;
+
+CUtpLayer* mock_create_utp_layer(
+	const std::uint8_t our_hash[NatTraversal::kUserHashSize],
+	const std::uint8_t peer_hash[NatTraversal::kUserHashSize],
+	const struct sockaddr* peer_addr,
+	socklen_t /*addr_len*/,
+	bool initiator)
+{
+	g_create_layer_capture.call_count++;
+	g_create_layer_capture.last_our_hash.assign(
+		our_hash, our_hash + NatTraversal::kUserHashSize);
+	g_create_layer_capture.last_peer_hash.assign(
+		peer_hash, peer_hash + NatTraversal::kUserHashSize);
+	if (peer_addr != nullptr) {
+		const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(peer_addr);
+		g_create_layer_capture.last_peer_ip   = ntohl(sin->sin_addr.s_addr);
+		g_create_layer_capture.last_peer_port = ntohs(sin->sin_port);
+	}
+	g_create_layer_capture.last_initiator = initiator;
+	return kSentinelLayer;
+}
+
+void install_d3_full_mocks()
+{
+	// D3 needs everything D1 has plus the CreateUtpLayer factory
+	// and a sendto delegate that captures into g_sent (for verifying
+	// the outbound OP_RENDEZVOUS).
+	install_d1_baseline();
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.SetSendEmuleProtDelegate(&mock_send_emule_prot);
+	coord.SetCreateUtpLayerDelegate(&mock_create_utp_layer);
+	g_sent.clear();
+	g_create_layer_capture = CreateLayerCapture();
+}
+
+} // anonymous namespace
+
+
+// Headline D3 test: RequestRendezvous emits OP_RENDEZVOUS to the
+// configured buddy. The callback does NOT fire yet — that happens
+// when OnInboundHolePunch arrives from the buddy.
+TEST(NatTraversalCoordinator, RequestRendezvousEmitsOpRendezvousToBuddy)
+{
+	install_d3_full_mocks();
+
+	std::uint8_t target_hash[NatTraversal::kUserHashSize];
+	fill_hash(target_hash, 0xA0);
+	sockaddr_in target_addr = MakeAddr(0x05060708u, 4662);
+
+	std::atomic<int> fires(0);
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.RequestRendezvous(target_hash,
+	                        reinterpret_cast<sockaddr*>(&target_addr),
+	                        sizeof(target_addr),
+	                        [&](bool, CUtpLayer*) { fires.fetch_add(1); });
+
+	// One OP_RENDEZVOUS emitted to the buddy.
+	ASSERT_EQUALS((std::size_t)1, g_sent.size());
+	ASSERT_EQUALS((int)NatTraversal::OP_RENDEZVOUS_OPCODE,
+	              (int)g_sent[0].opcode);
+	ASSERT_EQUALS((unsigned long)g_mock_buddy_ip,
+	              (unsigned long)g_sent[0].dest_ip);
+	ASSERT_EQUALS((int)g_mock_buddy_port, (int)g_sent[0].dest_port);
+
+	// Body decodes correctly: target_user_hash matches, no
+	// ext_endpoint (the buddy adds that on forward).
+	NatTraversal::RendezvousRequest decoded;
+	ASSERT_TRUE(NatTraversal::DecodeRendezvous(g_sent[0].body.data(),
+	                                          g_sent[0].body.size(),
+	                                          decoded));
+	ASSERT_TRUE(std::memcmp(decoded.target_user_hash, target_hash,
+	                       NatTraversal::kUserHashSize) == 0);
+	ASSERT_FALSE(decoded.has_ext_endpoint);
+
+	// Pending entry recorded; callback NOT fired yet.
+	ASSERT_EQUALS((std::size_t)1, coord.PendingCount());
+	ASSERT_EQUALS(0, fires.load());
+
+	teardown_baseline();
+}
+
+
+// OnInboundHolePunch with source matching a pending entry's buddy
+// → factory called with the right args, callback fires with success
+// + the sentinel layer pointer.
+TEST(NatTraversalCoordinator, HolePunchFromMatchingBuddyCompletesRendezvous)
+{
+	install_d3_full_mocks();
+
+	std::uint8_t target_hash[NatTraversal::kUserHashSize];
+	fill_hash(target_hash, 0xA0);
+	const std::uint32_t target_ip = 0x05060708u;
+	const std::uint16_t target_port = 4662;
+	sockaddr_in target_addr = MakeAddr(target_ip, target_port);
+
+	std::atomic<int> fires(0);
+	std::atomic<bool> got_ok(false);
+	std::atomic<bool> got_sentinel(false);
+
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.RequestRendezvous(target_hash,
+	                        reinterpret_cast<sockaddr*>(&target_addr),
+	                        sizeof(target_addr),
+	                        [&](bool ok, CUtpLayer* layer) {
+		fires.fetch_add(1);
+		got_ok.store(ok);
+		got_sentinel.store(layer == kSentinelLayer);
+	});
+
+	// Simulate HOLEPUNCH from the buddy.
+	coord.OnInboundHolePunch(g_mock_buddy_ip, g_mock_buddy_port);
+
+	ASSERT_EQUALS(1, fires.load());
+	ASSERT_TRUE(got_ok.load());
+	ASSERT_TRUE(got_sentinel.load());
+
+	// Factory called with our_hash, target's peer_hash, and
+	// target_addr — matches what RequestRendezvous recorded.
+	ASSERT_EQUALS(1, g_create_layer_capture.call_count);
+	ASSERT_EQUALS((unsigned long)target_ip,
+	              (unsigned long)g_create_layer_capture.last_peer_ip);
+	ASSERT_EQUALS((int)target_port,
+	              (int)g_create_layer_capture.last_peer_port);
+	for (std::size_t i = 0; i < NatTraversal::kUserHashSize; ++i) {
+		ASSERT_EQUALS((int)target_hash[i],
+		              (int)g_create_layer_capture.last_peer_hash[i]);
+	}
+
+	// Pending entry consumed.
+	ASSERT_EQUALS((std::size_t)0, coord.PendingCount());
+
+	teardown_baseline();
+}
+
+
+// OnInboundHolePunch from a non-matching source (not any pending
+// entry's buddy) is silently dropped — no factory call, no
+// callback fire, pending table unchanged.
+TEST(NatTraversalCoordinator, HolePunchFromUnknownSourceIsIgnored)
+{
+	install_d3_full_mocks();
+
+	std::uint8_t target_hash[NatTraversal::kUserHashSize];
+	fill_hash(target_hash, 0xA0);
+	sockaddr_in target_addr = MakeAddr(0x05060708u, 4662);
+
+	std::atomic<int> fires(0);
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.RequestRendezvous(target_hash,
+	                        reinterpret_cast<sockaddr*>(&target_addr),
+	                        sizeof(target_addr),
+	                        [&](bool, CUtpLayer*) { fires.fetch_add(1); });
+
+	ASSERT_EQUALS((std::size_t)1, coord.PendingCount());
+
+	// HOLEPUNCH from a wrong source — ignored.
+	coord.OnInboundHolePunch(0xFFFFFFFFu, 9999);
+
+	ASSERT_EQUALS(0, fires.load());
+	ASSERT_EQUALS(0, g_create_layer_capture.call_count);
+	ASSERT_EQUALS((std::size_t)1, coord.PendingCount());
+
+	teardown_baseline();
+}
+
+
+// RequestRendezvous fails synchronously when find_buddy reports no
+// buddy available (and the pending entry is NOT created).
+TEST(NatTraversalCoordinator, RequestFailsWhenNoBuddyAvailable)
+{
+	install_d3_full_mocks();
+	// Override the baseline buddy: no buddy available.
+	g_mock_buddy_available = false;
+
+	std::uint8_t target_hash[NatTraversal::kUserHashSize];
+	fill_hash(target_hash, 0xA0);
+	sockaddr_in target_addr = MakeAddr(0x05060708u, 4662);
+
+	std::atomic<int> fires(0);
+	std::atomic<bool> ok(true);
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.RequestRendezvous(target_hash,
+	                        reinterpret_cast<sockaddr*>(&target_addr),
+	                        sizeof(target_addr),
+	                        [&](bool ok_arg, CUtpLayer*) {
+		fires.fetch_add(1);
+		ok.store(ok_arg);
+	});
+
+	// Callback fired with failure; no pending entry; no packet.
+	ASSERT_EQUALS(1, fires.load());
+	ASSERT_FALSE(ok.load());
+	ASSERT_EQUALS((std::size_t)0, coord.PendingCount());
+	ASSERT_EQUALS((std::size_t)0, g_sent.size());
+
+	teardown_baseline();
+}
+
+
+// === Phase D4 — LowID endpoint role tests =======================
+
+namespace {
+
+// Lookup-by-endpoint mock: (ip, port) → user_hash. install_d4_mocks
+// pre-populates a single known endpoint.
+std::map<std::pair<std::uint32_t, std::uint16_t>,
+         std::array<std::uint8_t, NatTraversal::kUserHashSize>> g_known_endpoints;
+
+bool mock_lookup_by_endpoint(std::uint32_t ip, std::uint16_t port,
+                             std::uint8_t out_user_hash[NatTraversal::kUserHashSize])
+{
+	auto it = g_known_endpoints.find(std::make_pair(ip, port));
+	if (it == g_known_endpoints.end()) {
+		return false;
+	}
+	std::memcpy(out_user_hash, it->second.data(), NatTraversal::kUserHashSize);
+	return true;
+}
+
+void install_d4_mocks()
+{
+	// D4 needs our_hash + lookup-by-endpoint + create_utp_layer.
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.ClearPendingForTesting();
+
+	std::uint8_t our_hash[NatTraversal::kUserHashSize];
+	fill_hash(our_hash, 0x77);
+	coord.SetOurUserHash(our_hash);
+
+	coord.SetLookupClientByEndpointDelegate(&mock_lookup_by_endpoint);
+	coord.SetCreateUtpLayerDelegate(&mock_create_utp_layer);
+	g_known_endpoints.clear();
+	g_create_layer_capture = CreateLayerCapture();
+}
+
+void teardown_d4_mocks()
+{
+	teardown_baseline();
+	g_known_endpoints.clear();
+}
+
+} // anonymous namespace
+
+
+// Headline D4 test: buddy-forwarded RENDEZVOUS (has_ext_endpoint =
+// true) → endpoint looks up requester by ext_endpoint, creates a
+// passive CUtpLayer (initiator=false) keyed to requester's hash and
+// requester's ext_endpoint.
+TEST(NatTraversalCoordinator, EndpointReceivesForwardedRendezvousCreatesPassiveLayer)
+{
+	install_d4_mocks();
+
+	// Register R (the requester) in the known-endpoints table.
+	const std::uint32_t ip_r = 0x05060708u;
+	const std::uint16_t port_r = 23456;
+	std::array<std::uint8_t, NatTraversal::kUserHashSize> hash_r{};
+	for (std::size_t i = 0; i < NatTraversal::kUserHashSize; ++i) {
+		hash_r[i] = static_cast<std::uint8_t>(0x44 + i);
+	}
+	g_known_endpoints[std::make_pair(ip_r, port_r)] = hash_r;
+
+	// Buddy-forwarded RENDEZVOUS: target_user_hash = ours,
+	// has_ext_endpoint = true, ext_endpoint = R's external address.
+	std::uint8_t our_hash[NatTraversal::kUserHashSize];
+	fill_hash(our_hash, 0x77);   // matches install_d4_mocks
+	NatTraversal::RendezvousRequest req;
+	std::memcpy(req.target_user_hash, our_hash, sizeof(our_hash));
+	req.connect_options    = 0;
+	req.has_file_hash      = false;
+	req.has_ext_endpoint   = true;
+	req.requester_ext_ip   = ip_r;
+	req.requester_ext_port = port_r;
+
+	// Source of this packet is the buddy's IP (irrelevant for the
+	// endpoint path — we route by ext_endpoint, not packet source).
+	const std::uint32_t buddy_ip   = 0xDEADBEEFu;
+	const std::uint16_t buddy_port = 4242;
+
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.OnInboundRendezvous(req, buddy_ip, buddy_port);
+
+	// Layer factory called once with the right args.
+	ASSERT_EQUALS(1, g_create_layer_capture.call_count);
+
+	// our_hash matches the configured our_user_hash.
+	for (std::size_t i = 0; i < NatTraversal::kUserHashSize; ++i) {
+		ASSERT_EQUALS((int)our_hash[i],
+		              (int)g_create_layer_capture.last_our_hash[i]);
+	}
+	// peer_hash is R's hash (from the endpoint lookup).
+	for (std::size_t i = 0; i < NatTraversal::kUserHashSize; ++i) {
+		ASSERT_EQUALS((int)hash_r[i],
+		              (int)g_create_layer_capture.last_peer_hash[i]);
+	}
+	// peer_addr is R's ext_endpoint.
+	ASSERT_EQUALS((unsigned long)ip_r,
+	              (unsigned long)g_create_layer_capture.last_peer_ip);
+	ASSERT_EQUALS((int)port_r,
+	              (int)g_create_layer_capture.last_peer_port);
+	// Initiator flag = false (responder).
+	ASSERT_FALSE(g_create_layer_capture.last_initiator);
+
+	teardown_d4_mocks();
+}
+
+
+// If the endpoint doesn't recognise the requester (no entry in the
+// lookup table), the layer is NOT created — the rendezvous fails
+// silently and the requester's incoming uTP will be rejected at
+// libutp's on_accept stage.
+TEST(NatTraversalCoordinator, EndpointDropsRendezvousFromUnknownRequester)
+{
+	install_d4_mocks();
+	// Deliberately empty g_known_endpoints — lookup will fail.
+
+	std::uint8_t our_hash[NatTraversal::kUserHashSize];
+	fill_hash(our_hash, 0x77);
+	NatTraversal::RendezvousRequest req;
+	std::memcpy(req.target_user_hash, our_hash, sizeof(our_hash));
+	req.connect_options    = 0;
+	req.has_file_hash      = false;
+	req.has_ext_endpoint   = true;
+	req.requester_ext_ip   = 0xFFFFFFFFu;
+	req.requester_ext_port = 9999;
+
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.OnInboundRendezvous(req, 0xDEADBEEFu, 4242);
+
+	ASSERT_EQUALS(0, g_create_layer_capture.call_count);
+
+	teardown_d4_mocks();
+}
+
+
 // Without delegates installed, the buddy path is a safe no-op —
 // matches the "production thunks installed at startup, tests don't
 // crash if they skip" pattern.
@@ -446,8 +857,8 @@ TEST(NatTraversalCoordinator, BuddyDropsWithoutDelegates)
 // no entry added.
 TEST(NatTraversalCoordinator, RequestRendezvousWithNullCallbackRejected)
 {
+	install_d1_baseline();
 	auto& coord = CNatTraversalCoordinator::Instance();
-	coord.ClearPendingForTesting();
 
 	std::uint8_t hash[NatTraversal::kUserHashSize];
 	fill_hash(hash, 0x10);
