@@ -357,3 +357,25 @@ if (ENABLE_NAT_T)
 		utp
 	)
 endif()
+
+# Phase B4 of the NAT-T port: Key Frame encoder/parser. Pure-function
+# byte-level tests with no libutp dependency, so the test is
+# compiled unconditionally (matches the NatTraversalTest pattern from
+# Phase A3).
+add_executable (UtpKeyFrameTest
+	UtpKeyFrameTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpKeyFrame.cpp
+)
+
+add_test (NAME UtpKeyFrameTest
+	COMMAND UtpKeyFrameTest
+)
+
+target_include_directories (UtpKeyFrameTest
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpKeyFrameTest
+	muleunit
+)
