@@ -781,6 +781,16 @@ void CSearch::StorePacket()
 			packetdata.WriteUInt128(CKademlia::GetPrefs()->GetClientHash());
 			// Send client port so they can do a callback.
 			packetdata.WriteUInt16(thePrefs::GetPort());
+			// Phase D5b: append our connectOptions byte so eMuleAI
+			// peers can decide whether to accept us into additional
+			// served-buddy slots (their policy requires NAT-T support
+			// beyond slot 1 — eMuleAI's
+			// KademliaUDPListener.cpp:1742-1748). Old aMule peers
+			// without D5b ignore extra bytes past the 34-byte
+			// mandatory body, so this is wire-compatible in both
+			// directions. natTraversal=true because FINDBUDDY_REQ is
+			// a Hello-style context.
+			packetdata.WriteUInt8(CPrefs::GetMyConnectOptions(true, false, /*natTraversal=*/true));
 
 			DebugSend(KadFindBuddyReq, from->GetIPAddress(), from->GetUDPPort());
 			if (from->GetVersion() >= 6) {

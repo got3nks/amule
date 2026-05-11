@@ -166,7 +166,10 @@ void CKademliaUDPListener::FirewalledCheck(uint32_t ip, uint16_t port, const CKa
 		CMemFile packetdata(19);
 		packetdata.WriteUInt16(thePrefs::GetPort());
 		packetdata.WriteUInt128(CKademlia::GetPrefs()->GetClientHash());
-		packetdata.WriteUInt8(CPrefs::GetMyConnectOptions(true, false));
+		// FIREWALLED2_REQ is a Hello-style context (the receiver
+		// uses these options to decide how to call us back), so
+		// bit 7 = NAT-T support is appropriate here (Phase D5b).
+		packetdata.WriteUInt8(CPrefs::GetMyConnectOptions(true, false, /*natTraversal=*/true));
 		DebugSend(KadFirewalled2Req, ip, port);
 		SendPacket(packetdata, KADEMLIA_FIREWALLED2_REQ, ip, port, senderKey, NULL);
 	} else {
@@ -1430,8 +1433,27 @@ void CKademliaUDPListener::ProcessFindBuddyRequest(const uint8_t *packetData, ui
 	if (CKademlia::GetPrefs()->GetFirewalled() || CUDPFirewallTester::IsFirewalledUDP(true) || !CUDPFirewallTester::IsVerified()) {
 		// We are firewalled but somehow we still got this packet.. Don't send a response..
 		return;
-	} else if (theApp->clientlist->GetBuddyStatus() == Connected) {
-		// we already have a buddy
+	}
+
+	// Phase D5b: eMuleAI's extension (KademliaUDPListener.cpp:1719-1748)
+	// includes an optional byReqConnectOpts byte after the mandatory
+	// 34 bytes. Bit 7 (0x80) signals the requester supports NAT-T.
+	// We use this to decide whether to accept beyond the first
+	// served-buddy slot.
+	uint8_t requesterConnectOpts = 0;
+	if (lenPacket > 34) {
+		// Sniff the optional byte without consuming the main parser's
+		// position — easier than re-rolling the CMemFile reads later.
+		requesterConnectOpts = packetData[34];
+	}
+	const bool requesterSupportsNatT = (requesterConnectOpts & 0x80) != 0;
+
+	const bool slotTaken = (theApp->clientlist->GetBuddyStatus() == Connected);
+	if (slotTaken && !requesterSupportsNatT) {
+		// First slot taken AND the requester isn't NAT-T capable.
+		// Reject — matches the pre-D5b single-buddy semantics for
+		// non-NAT-T peers and eMuleAI's "first slot doesn't require
+		// NAT-T, additional slots do" policy (line 1742-1748).
 		return;
 	}
 
@@ -1442,16 +1464,33 @@ void CKademliaUDPListener::ProcessFindBuddyRequest(const uint8_t *packetData, ui
 
 	CUInt128 zero;
 	CContact contact(userID, ip, port, tcpport, 0, 0, false, zero);
-	if (!theApp->clientlist->IncomingBuddy(&contact, &BuddyID)) {
-		return; // cancelled for some reason, don't send a response
+	if (!slotTaken) {
+		// Slot 1 path: full single-buddy lifecycle via IncomingBuddy.
+		// Preserves the existing aMule UDP-callback behavior.
+		if (!theApp->clientlist->IncomingBuddy(&contact, &BuddyID)) {
+			return; // cancelled for some reason, don't send a response
+		}
 	}
+	// Else (slot 1 taken, requester supports NAT-T): we don't track
+	// the peer in any list (stateless additional-relay mode); we
+	// just respond with FINDBUDDY_RES so the requester knows we're
+	// available as a NAT-T relay. Subsequent OP_RENDEZVOUS from this
+	// peer is routed by source-address through D2's buddy path,
+	// which doesn't need per-buddy state. Full per-served-buddy
+	// tracking (for the older UDP-callback flow) can be added in a
+	// later sub-commit when there's demand for it.
 
 	CMemFile packetdata(34);
 	packetdata.WriteUInt128(BuddyID);
 	packetdata.WriteUInt128(CKademlia::GetPrefs()->GetClientHash());
 	packetdata.WriteUInt16(thePrefs::GetPort());
 	if (!senderKey.IsEmpty()) { // remove check for later versions
-		packetdata.WriteUInt8(CPrefs::GetMyConnectOptions(true, false)); // new since 0.49a, old mules will ignore it  (hopefully ;) )
+		// Phase D5b: FINDBUDDY_RES is a Hello-style context — bit 7
+		// of connectOptions is NAT-T support, telling the requester
+		// we can act as a NAT-T relay for them. eMuleAI peers
+		// require this bit to be set when accepting beyond-first
+		// served-buddy slots (KademliaUDPListener.cpp:1742-1748).
+		packetdata.WriteUInt8(CPrefs::GetMyConnectOptions(true, false, /*natTraversal=*/true)); // new since 0.49a, old mules will ignore it  (hopefully ;) )
 	}
 
 	DebugSend(KadFindBuddyRes, ip, port);

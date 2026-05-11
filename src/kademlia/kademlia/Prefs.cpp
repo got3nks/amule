@@ -214,18 +214,32 @@ void CPrefs::SetKademliaFiles()
 	m_kademliaFiles = nKadAverage * m_kademliaUsers;
 }
 
-uint8_t CPrefs::GetMyConnectOptions(bool encryption, bool callback)
+uint8_t CPrefs::GetMyConnectOptions(bool encryption, bool callback, bool natTraversal)
 {
        // Connect options Tag
-       // 4 Reserved (!)
-       // 1 Direct Callback
-       // 1 CryptLayer Required
-       // 1 CryptLayer Requested
-       // 1 CryptLayer Supported
+       // 1 NAT Traversal (bit 7 = 0x80)   <-- only set in Hello-style contexts
+       // 3 Reserved (bits 4-6)
+       // 1 Direct Callback                 (bit 3 = 0x08)
+       // 1 CryptLayer Required             (bit 2 = 0x04)
+       // 1 CryptLayer Requested            (bit 1 = 0x02)
+       // 1 CryptLayer Supported            (bit 0 = 0x01)
 
        // direct callback is only possible if connected to kad, tcp firewalled and verified UDP open (for example on a full cone NAT)
 
-       return    ((callback && theApp->IsFirewalled() && CKademlia::IsRunning() && !CUDPFirewallTester::IsFirewalledUDP(true) && CUDPFirewallTester::IsVerified()) ? 0x08 : 0)
+       // Phase D5b: bit 7 (NAT-T support) is added in Hello-style
+       // contexts so peers know we can participate as a NAT-T
+       // initiator / endpoint / buddy. Build-time gated on
+       // ENABLE_NAT_T — vanilla builds without the feature still
+       // advertise the rest unchanged.
+#ifdef ENABLE_NAT_T
+       const uint8_t nat_bit = natTraversal ? 0x80 : 0;
+#else
+       (void)natTraversal;
+       const uint8_t nat_bit = 0;
+#endif
+
+       return    nat_bit
+	       | ((callback && theApp->IsFirewalled() && CKademlia::IsRunning() && !CUDPFirewallTester::IsFirewalledUDP(true) && CUDPFirewallTester::IsVerified()) ? 0x08 : 0)
 	       | ((thePrefs::IsClientCryptLayerRequired() && encryption) ? 0x04 : 0)
 	       | ((thePrefs::IsClientCryptLayerRequested() && encryption) ? 0x02 : 0)
 	       | ((thePrefs::IsClientCryptLayerSupported() && encryption) ? 0x01 : 0);

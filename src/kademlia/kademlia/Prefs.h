@@ -115,7 +115,17 @@ public:
 	void	 SetExternKadPort(uint16_t port, uint32_t fromIP);
 	bool	 FindExternKadPort(bool reset = false);
 
-	static uint8_t	GetMyConnectOptions(bool encryption = true, bool callback = true);
+	// Phase D5b: `natTraversal` adds bit 7 (0x80,
+	// CONNECT_OPT_BIT_NAT_TRAVERSAL — see src/NatTraversal.h). Must
+	// be true ONLY in Hello-style contexts (Hello packet, Kad
+	// FindBuddy req/res, DirectCallbackReq); MUST be false in
+	// server source-exchange contexts where bit 7 is overloaded to
+	// mean "hash follows" (see NatTraversal.h's
+	// `treat_bit7_as_nat_t` contract from Phase A3). Default is
+	// `false` for backward safety — callers in Hello-style
+	// contexts explicitly opt in.
+	static uint8_t	GetMyConnectOptions(bool encryption = true, bool callback = true,
+	                                    bool natTraversal = false);
 	static uint32_t GetUDPVerifyKey(uint32_t targetIP);
 
 	// Statistics
