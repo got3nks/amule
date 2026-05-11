@@ -85,6 +85,47 @@ public:
 	// no Shutdown() needed.
 	static CNatTraversalCoordinator& Instance();
 
+	// === Delegate API (D2+) ========================================
+	//
+	// The coordinator needs to consult the wider aMule app for three
+	// things: look up a client by user hash (buddy → endpoint
+	// routing), look up a client by UDP endpoint (endpoint →
+	// requester identification), and emit OP_EMULEPROT-wrapped UDP
+	// packets. Production wires these to theApp->clientlist /
+	// CClientUDPSocket; tests install lightweight stubs. Matches the
+	// UtpEncryption Set*Delegate pattern from B5 — keeps the
+	// coordinator unit-testable without pulling in theApp.
+
+	// Look up a client's UDP endpoint by their user hash. Returns
+	// true if a known client matches; out args filled with the
+	// client's external (NAT-translated) IP/port in host byte order.
+	using LookupClientByHashFn = bool (*)(
+		const std::uint8_t user_hash[kUserHashSize],
+		std::uint32_t& out_ip_host,
+		std::uint16_t& out_udp_port);
+
+	// Look up a client's user hash given their UDP endpoint.
+	// Returns true if a known client matches; out_user_hash filled
+	// with the 16-byte hash on success.
+	using LookupClientByEndpointFn = bool (*)(
+		std::uint32_t ip_host,
+		std::uint16_t udp_port,
+		std::uint8_t out_user_hash[kUserHashSize]);
+
+	// Emit an OP_EMULEPROT-wrapped UDP packet to (dest_ip, dest_port).
+	// `opcode` is the inner eMule-extension opcode (e.g.
+	// OP_RENDEZVOUS_OPCODE). `body` may be nullptr if body_len == 0.
+	// Returns true if the packet was queued for send.
+	using SendEmuleProtFn = bool (*)(
+		std::uint8_t opcode,
+		const std::uint8_t* body, std::size_t body_len,
+		std::uint32_t dest_ip_host,
+		std::uint16_t dest_udp_port);
+
+	void SetLookupClientByHashDelegate(LookupClientByHashFn fn);
+	void SetLookupClientByEndpointDelegate(LookupClientByEndpointFn fn);
+	void SetSendEmuleProtDelegate(SendEmuleProtFn fn);
+
 	// === LowID requester role (D3, this method is D1 stub) =========
 	//
 	// Called by CUpDownClient (in Phase E) when it wants to reach a
@@ -169,6 +210,14 @@ private:
 	using HashKey = std::array<std::uint8_t, kUserHashSize>;
 	mutable std::mutex                   m_lock;  // mutable: PendingCount() const path
 	std::map<HashKey, PendingRendezvous> m_pending;
+
+	// Delegate slots. Set once at startup (production thunks or test
+	// stubs); read from any role-handler. Reading without locking is
+	// safe under the "delegates set at startup, no races" contract
+	// inherited from UtpEncryption's design.
+	LookupClientByHashFn     m_lookup_by_hash     = nullptr;
+	LookupClientByEndpointFn m_lookup_by_endpoint = nullptr;
+	SendEmuleProtFn          m_send_emule_prot    = nullptr;
 };
 
 } // namespace NatTraversal

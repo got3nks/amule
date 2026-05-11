@@ -38,6 +38,21 @@ CNatTraversalCoordinator& CNatTraversalCoordinator::Instance()
 	return s_instance;
 }
 
+void CNatTraversalCoordinator::SetLookupClientByHashDelegate(LookupClientByHashFn fn)
+{
+	m_lookup_by_hash = fn;
+}
+
+void CNatTraversalCoordinator::SetLookupClientByEndpointDelegate(LookupClientByEndpointFn fn)
+{
+	m_lookup_by_endpoint = fn;
+}
+
+void CNatTraversalCoordinator::SetSendEmuleProtDelegate(SendEmuleProtFn fn)
+{
+	m_send_emule_prot = fn;
+}
+
 void CNatTraversalCoordinator::RequestRendezvous(
 	const std::uint8_t target_user_hash[kUserHashSize],
 	const struct sockaddr* target_addr_hint,
@@ -90,18 +105,77 @@ void CNatTraversalCoordinator::RequestRendezvous(
 }
 
 void CNatTraversalCoordinator::OnInboundRendezvous(
-	const RendezvousRequest& /*req*/,
-	std::uint32_t /*src_ip_host*/,
-	std::uint16_t /*src_port*/)
+	const RendezvousRequest& req,
+	std::uint32_t src_ip_host,
+	std::uint16_t src_port)
 {
-	// D1 stub. D2 (buddy role) and D4 (endpoint role) fill this in
-	// based on req.has_ext_endpoint:
-	//   - false → we are the buddy, req came from the requester;
-	//     forward to the LowID endpoint we know about + send
-	//     HOLEPUNCH back to requester.
-	//   - true  → we are the endpoint, req came from a buddy
-	//     forwarding the requester's RENDEZVOUS; prep a passive
-	//     CUtpLayer.
+	// Dispatch on req.has_ext_endpoint:
+	//   - false → we are the BUDDY, req came directly from the LowID
+	//     requester. Forward to the target LowID endpoint + emit
+	//     HOLEPUNCH back to the requester.
+	//   - true  → we are the ENDPOINT (D4, future); req came from a
+	//     buddy forwarding the requester's RENDEZVOUS; prep a passive
+	//     CUtpLayer keyed to req.requester_ext_endpoint.
+
+	if (!req.has_ext_endpoint) {
+		// === BUDDY ROLE (D2) ====================================
+		//
+		// Look up where the target LowID peer is. We're a HighID
+		// buddy by virtue of having a UDP-reachable connection to
+		// the target; if we don't know them, we silently drop —
+		// the requester will retry with a different buddy
+		// candidate, or eventually time out.
+		if (m_lookup_by_hash == nullptr || m_send_emule_prot == nullptr) {
+			// Delegates not installed (test paths or pre-startup).
+			return;
+		}
+
+		std::uint32_t target_ip   = 0;
+		std::uint16_t target_port = 0;
+		if (!m_lookup_by_hash(req.target_user_hash, target_ip, target_port)) {
+			// We don't know this target — not our problem to relay.
+			return;
+		}
+
+		// Forward OP_RENDEZVOUS to the target. The body carries the
+		// original target_user_hash + connect_options, plus the
+		// ext_endpoint fields filled in with the requester's
+		// observed external address. The target uses ext_endpoint
+		// to know where to expect the incoming uTP connection from.
+		RendezvousRequest forwarded;
+		std::memcpy(forwarded.target_user_hash, req.target_user_hash,
+		            kUserHashSize);
+		forwarded.connect_options    = req.connect_options;
+		forwarded.has_file_hash      = req.has_file_hash;
+		if (forwarded.has_file_hash) {
+			std::memcpy(forwarded.target_file_hash, req.target_file_hash,
+			            kUserHashSize);
+		} else {
+			std::memset(forwarded.target_file_hash, 0, kUserHashSize);
+		}
+		forwarded.has_ext_endpoint   = true;
+		forwarded.requester_ext_ip   = src_ip_host;
+		forwarded.requester_ext_port = src_port;
+
+		std::vector<std::uint8_t> body;
+		if (!EncodeRendezvous(forwarded, body)) {
+			return;
+		}
+		m_send_emule_prot(OP_RENDEZVOUS_OPCODE,
+		                  body.data(), body.size(),
+		                  target_ip, target_port);
+
+		// Send HOLEPUNCH back to the requester. Empty body — the
+		// HOLEPUNCH packet is itself the signal that the rendezvous
+		// has been relayed and the requester should now start its
+		// uTP connect against the target's already-known address.
+		m_send_emule_prot(OP_HOLEPUNCH_OPCODE,
+		                  nullptr, 0,
+		                  src_ip_host, src_port);
+		return;
+	}
+
+	// req.has_ext_endpoint == true → endpoint (D4) path. Stub for now.
 }
 
 void CNatTraversalCoordinator::OnInboundHolePunch(

@@ -580,6 +580,7 @@ target_link_libraries (NatTraversalRendezvousTest
 add_executable (NatTraversalCoordinatorTest
 	NatTraversalCoordinatorTest.cpp
 	${CMAKE_SOURCE_DIR}/src/NatTraversalCoordinator.cpp
+	${CMAKE_SOURCE_DIR}/src/NatTraversal.cpp
 )
 
 add_test (NAME NatTraversalCoordinatorTest
