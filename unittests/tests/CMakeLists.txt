@@ -213,3 +213,23 @@ if (ENABLE_NAT_T)
 		utp
 	)
 endif()
+
+# Phase A3 of the NAT-T port: pure-function tests for the connect-options
+# byte's NAT-T capability bit. Compiled unconditionally (the helpers live
+# in a header-only namespace so the test doesn't depend on ENABLE_NAT_T).
+add_executable (NatTraversalTest
+	NatTraversalTest.cpp
+)
+
+add_test (NAME NatTraversalTest
+	COMMAND NatTraversalTest
+)
+
+target_include_directories (NatTraversalTest
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (NatTraversalTest
+	muleunit
+)

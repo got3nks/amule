@@ -302,7 +302,10 @@ void CClientUDPSocket::ProcessPacket(uint8_t* packet, int16 size, int8 opcode, u
 					requester->SetUserHash(CMD4Hash(userHash));
 					theApp->clientlist->AddClient(requester);
 				}
-				requester->SetConnectOptions(connectOptions, true, false);
+				// DirectCallbackReq context: bit 7 of connectOptions is the
+				// NAT-T capability bit. Pass natTraversal=true so the byte
+				// gets parsed as the eMule wire protocol intends here.
+				requester->SetConnectOptions(connectOptions, true, false, true);
 				requester->SetDirectUDPCallbackSupport(false);
 				requester->SetIP(host);
 				requester->SetUserPort(remoteTCPPort);

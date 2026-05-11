@@ -582,7 +582,15 @@ public:
 	void		SetCryptLayerRequest(bool bVal)			{ m_fRequestsCryptLayer = bVal ? 1 : 0; }
 	void		SetCryptLayerRequires(bool bVal)		{ m_fRequiresCryptLayer = bVal ? 1 : 0; }
 	void		SetDirectUDPCallbackSupport(bool bVal)		{ m_fDirectUDPCallback = bVal ? 1 : 0; }
-	void		SetConnectOptions(uint8_t options, bool encryption = true, bool callback = true); // shortcut, sets crypt, callback, etc from the tagvalue we receive
+	// NAT-T capability advertised by the peer via bit 7 of the connect-options
+	// byte in Hello / DirectCallbackReq contexts. Default false; set true only
+	// when SetConnectOptions is called with natTraversal=true.
+	bool		SupportsNatTraversal() const			{ return m_fSupportsNatTraversal != 0; }
+	void		SetNatTraversalSupport(bool bVal)		{ m_fSupportsNatTraversal = bVal ? 1 : 0; }
+	// Default natTraversal=false because the same byte appears in server
+	// source-exchange packets where bit 7 means "hash follows", not NAT-T.
+	// Pass natTraversal=true only from Hello / DirectCallbackReq paths.
+	void		SetConnectOptions(uint8_t options, bool encryption = true, bool callback = true, bool natTraversal = false); // shortcut, sets crypt, callback, etc from the tagvalue we receive
 	bool		ShouldReceiveCryptUDPPackets() const;
 
 	bool		HasDisabledSharedFiles() const { return m_fNoViewSharedFiles; }
@@ -778,7 +786,8 @@ private:
 		m_fRequiresCryptLayer: 1,
 		m_fSupportsSourceEx2 : 1,
 		m_fSupportsCaptcha   : 1,
-		m_fDirectUDPCallback : 1;
+		m_fDirectUDPCallback : 1,
+		m_fSupportsNatTraversal : 1;
 
 	unsigned int
 		m_fOsInfoSupport : 1,

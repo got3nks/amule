@@ -29,6 +29,7 @@
 
 #include "updownclient.h"	// Needed for CUpDownClient
 #include "SharedFileList.h"	// Needed for CSharedFileList
+#include "NatTraversal.h"	// Needed for NatTraversal::CONNECT_OPT_BIT_NAT_TRAVERSAL
 
 #include <protocol/Protocols.h>
 #include <protocol/ed2k/Client2Client/TCP.h>
@@ -2965,12 +2966,17 @@ void CUpDownClient::ProcessFirewallCheckUDPRequest(CMemFile* data)
 	//DebugLog(_T("Answered UDP Firewallcheck request (%s)"), GetClientFullInfo());
 }
 
-void CUpDownClient::SetConnectOptions(uint8_t options, bool encryption, bool callback)
+void CUpDownClient::SetConnectOptions(uint8_t options, bool encryption, bool callback, bool natTraversal)
 {
 	SetCryptLayerSupport((options & 0x01) != 0 && encryption);
 	SetCryptLayerRequest((options & 0x02) != 0 && encryption);
 	SetCryptLayerRequires((options & 0x04) != 0 && encryption);
 	SetDirectUDPCallbackSupport((options & 0x08) != 0 && callback);
+	// Bit 7 is contextual: in Hello / DirectCallbackReq it means NAT-T;
+	// in server source-exchange packets it means "hash follows". The
+	// natTraversal flag forces the caller to declare which context this
+	// byte came from. See NatTraversal.h for the full rationale.
+	SetNatTraversalSupport((options & NatTraversal::CONNECT_OPT_BIT_NAT_TRAVERSAL) != 0 && natTraversal);
 }
 
 
