@@ -131,6 +131,18 @@ public:
 	//   2. Record our_hash, peer_hash, peer_addr for later steps.
 	//   3. Transition INIT → KEY_FRAME_SENT.
 	//
+	// `initiator` selects the post-Key-Frame-exchange behavior:
+	//   - true (default): layer drives the uTP handshake — on
+	//     receiving the peer's Key Frame, OnPeerKeyFrame calls
+	//     utp_create_socket + utp_connect, emitting the SYN.
+	//   - false: layer waits passively for an incoming SYN — on
+	//     receiving the peer's Key Frame, OnPeerKeyFrame just
+	//     records that the key bootstrap is done; the actual
+	//     utp_socket is created by libutp during UTP_ON_ACCEPT,
+	//     which routes through OnUtpAccept below. One side per
+	//     connection picks `initiator=true`; the other picks
+	//     `initiator=false`.
+	//
 	// Returns false on prerequisite failures:
 	//   - Layer already past INIT.
 	//   - NULL pointers, zero-length address.
@@ -138,23 +150,37 @@ public:
 	//   - SendRaw fails (no sendto delegate, etc.).
 	bool Connect(const std::uint8_t our_hash[kUserHashSize],
 	             const std::uint8_t peer_hash[kUserHashSize],
-	             const struct sockaddr* peer_addr, socklen_t addr_len);
+	             const struct sockaddr* peer_addr, socklen_t addr_len,
+	             bool initiator = true);
 
 	// Called by the inbound-dispatch path (CClientUDPSocket) when a
 	// sub-byte-0xFF Key Frame arrives whose sender_hash matches
-	// (one of) the layers waiting in KEY_FRAME_SENT. The current
-	// Phase B6 wiring only verifies the embedded sender_hash equals
-	// the peer_hash we recorded in Connect; layer-routing (which
-	// layer's OnPeerKeyFrame to call, when multiple layers exist)
-	// is solved upstream — this method just refuses to advance on a
+	// the peer_hash we recorded in Connect. Refuses to advance on a
 	// hash mismatch.
 	//
-	// On match: creates a utp_socket via utp_create_socket, attaches
-	// `this` as utp_set_userdata, calls utp_connect against the
-	// recorded peer_addr, transitions KEY_FRAME_SENT → UTP_CONNECTING.
+	// On match — initiator side: creates a utp_socket via
+	// utp_create_socket, attaches `this` as utp_set_userdata, calls
+	// utp_connect against the recorded peer_addr, transitions
+	// KEY_FRAME_SENT → UTP_CONNECTING.
+	//
+	// On match — responder side: just transitions KEY_FRAME_SENT →
+	// UTP_CONNECTING. The actual utp_socket arrives later via libutp's
+	// UTP_ON_ACCEPT callback (handled by OnUtpAccept below) when the
+	// initiator's SYN reaches this side.
 	//
 	// Returns true iff a state transition occurred.
 	bool OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize]);
+
+	// Called by UtpCallbacks::on_accept when libutp creates a fresh
+	// utp_socket for an incoming SYN whose source address is our
+	// recorded peer_addr. Phase B8 responder path: we take ownership
+	// of the socket, attach `this` as utp_set_userdata, and remain in
+	// UTP_CONNECTING until libutp fires UTP_STATE_CONNECT.
+	//
+	// Lock NOT acquired here — caller (libutp via UtpCallbacks) holds
+	// RuntimeLock around the utp_process_udp call that produced this
+	// on_accept invocation.
+	void OnUtpAccept(utp_socket* accepted_socket);
 
 	// Manual time-based timeout driver. `elapsed_ms` is the time
 	// since Connect() was called, in milliseconds — kept for tests
@@ -260,6 +286,11 @@ private:
 	// per-tick sweep in UtpTimer doesn't fire timeouts on layers that
 	// haven't started a handshake.
 	std::chrono::steady_clock::time_point m_connect_started_at;
+
+	// Phase B8: chosen at Connect() time. Initiator drives the uTP
+	// handshake (utp_connect). Responder waits for the SYN to arrive
+	// via UTP_ON_ACCEPT.
+	bool m_initiator;
 };
 
 #endif // ENABLE_NAT_T

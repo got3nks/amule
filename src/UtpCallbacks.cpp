@@ -153,6 +153,32 @@ uint64_t on_sendto(utp_callback_arguments* a)
 	return 0;
 }
 
+uint64_t on_accept(utp_callback_arguments* a)
+{
+	// libutp created a fresh utp_socket for an incoming SYN that
+	// didn't match any existing connection in the context. Phase B8:
+	// look up the layer registered for the source address (the
+	// responder pre-registered itself via Connect()'s peer_addr key).
+	// If found, hand the socket to the layer; otherwise reject via
+	// utp_close — matches eMuleAI's UtpSocket.cpp:629 pattern.
+	if (a == NULL || a->socket == NULL || a->address == NULL) {
+		return 0;
+	}
+
+	CUtpLayer* layer = UtpLayerRegistry::FindByPeerAddr(a->address, a->address_len);
+	if (layer == NULL) {
+		// Unsolicited incoming connection — drop. libutp's contract
+		// for the on_accept callback is that the socket is "owned"
+		// by us after the callback fires; closing it tells libutp
+		// to tear it down.
+		utp_close(a->socket);
+		return 0;
+	}
+
+	layer->OnUtpAccept(a->socket);
+	return 0;
+}
+
 uint64_t on_error(utp_callback_arguments* a)
 {
 	// a->socket: the connection that errored
@@ -202,6 +228,7 @@ bool InstallOnContext(utp_context* ctx)
 	utp_set_callback(ctx, UTP_SENDTO,               &on_sendto);
 	utp_set_callback(ctx, UTP_ON_ERROR,             &on_error);
 	utp_set_callback(ctx, UTP_GET_READ_BUFFER_SIZE, &on_get_read_buffer_size);
+	utp_set_callback(ctx, UTP_ON_ACCEPT,            &on_accept);
 
 	return true;
 }

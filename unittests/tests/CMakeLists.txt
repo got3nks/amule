@@ -513,3 +513,40 @@ target_include_directories (UtpLayerRegistryTest
 target_link_libraries (UtpLayerRegistryTest
 	muleunit
 )
+
+# Phase B8 of the NAT-T port: end-of-phase integration test. Drives
+# the full bidirectional handshake (Key Frame exchange + uTP
+# SYN/SYN-ACK) and a 64 KiB data round-trip via an in-process router
+# that replays sendto-delegate captures into the recipient side's
+# inbound dispatch. Pulls EVERY Utp* TU into the link since the test
+# exercises end-to-end behavior — initiator side, responder side,
+# timer, encryption, registry, callbacks.
+add_executable (UtpLoopbackIntegrationTest
+	UtpLoopbackIntegrationTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpKeyFrame.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
+)
+
+add_test (NAME UtpLoopbackIntegrationTest
+	COMMAND UtpLoopbackIntegrationTest
+)
+
+target_include_directories (UtpLoopbackIntegrationTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpLoopbackIntegrationTest
+	muleunit
+)
+
+if (ENABLE_NAT_T)
+	target_link_libraries (UtpLoopbackIntegrationTest
+		utp
+	)
+endif()

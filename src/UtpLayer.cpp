@@ -48,6 +48,7 @@ CUtpLayer::CUtpLayer(utp_context* ctx)
 	, m_state(State::INIT)
 	, m_writable(false)
 	, m_peer_addr_len(0)
+	, m_initiator(true)
 {
 	std::memset(m_our_hash,  0, sizeof(m_our_hash));
 	std::memset(m_peer_hash, 0, sizeof(m_peer_hash));
@@ -71,7 +72,8 @@ CUtpLayer::~CUtpLayer()
 bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
                         const std::uint8_t peer_hash[kUserHashSize],
                         const struct sockaddr* peer_addr,
-                        socklen_t addr_len)
+                        socklen_t addr_len,
+                        bool initiator)
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
@@ -108,6 +110,7 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 	                   reinterpret_cast<const std::uint8_t*>(peer_addr) + addr_len);
 	m_peer_addr_len        = addr_len;
 	m_connect_started_at   = std::chrono::steady_clock::now();
+	m_initiator            = initiator;
 	m_state                = State::KEY_FRAME_SENT;
 
 	// Publish in the process-wide registry under BOTH the peer's user
@@ -140,9 +143,18 @@ bool CUtpLayer::OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize])
 		return false;
 	}
 
-	// Bring up the libutp side: create the socket, register `this`
-	// so the static callbacks can dispatch into us, then utp_connect
-	// fires the SYN through on_sendto.
+	// Phase B8 responder path: we don't drive the uTP handshake; we
+	// wait for libutp's UTP_ON_ACCEPT callback to deliver the
+	// initiator's SYN, which OnUtpAccept will turn into a bound
+	// socket. Just record the state transition.
+	if (!m_initiator) {
+		m_state = State::UTP_CONNECTING;
+		return true;
+	}
+
+	// Initiator path: bring up the libutp side — create the socket,
+	// register `this` so the static callbacks can dispatch into us,
+	// then utp_connect fires the SYN through on_sendto.
 	if (m_ctx == NULL) {
 		m_state = State::FAILED;
 		return true;
@@ -167,6 +179,40 @@ bool CUtpLayer::OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize])
 
 	m_state = State::UTP_CONNECTING;
 	return true;
+}
+
+void CUtpLayer::OnUtpAccept(utp_socket* accepted_socket)
+{
+	// Lock NOT acquired here — caller (libutp via UtpCallbacks::on_accept)
+	// holds RuntimeLock around the utp_process_udp call that triggered
+	// this on_accept invocation.
+	if (accepted_socket == NULL) {
+		return;
+	}
+
+	// Defensive: we already own a socket somehow (state transition
+	// race?). Reject the new one rather than leaking the existing.
+	if (m_socket != NULL) {
+		utp_close(accepted_socket);
+		return;
+	}
+
+	m_socket = accepted_socket;
+	utp_set_userdata(m_socket, this);
+
+	// libutp does NOT fire UTP_STATE_CONNECT on the responder side —
+	// that callback is gated on CS_SYN_SENT → CS_CONNECTED, which
+	// only the initiator does (utp_internal.cpp:2164). The responder
+	// silently transitions CS_SYN_RECV → CS_CONNECTED on first
+	// ST_DATA arrival (utp_internal.cpp:2160) with no callback. So
+	// from the application's perspective, OnUtpAccept firing IS the
+	// "connected" signal: libutp has accepted the SYN, sent its
+	// ST_STATE response, and we're free to receive (and send, once
+	// libutp's window allows). Transition straight to CONNECTED;
+	// m_writable becomes true here too so any buffered Send() drains.
+	m_state    = State::CONNECTED;
+	m_writable = true;
+	DrainWriteBufferLocked();
 }
 
 bool CUtpLayer::CheckTimeout(std::uint64_t elapsed_ms)
