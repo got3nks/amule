@@ -379,3 +379,32 @@ target_include_directories (UtpKeyFrameTest
 target_link_libraries (UtpKeyFrameTest
 	muleunit
 )
+
+# Phase B5 of the NAT-T port: encryption wrapping for the
+# OP_UDPRESERVEDPROT2 envelope. The test deliberately does NOT pull
+# in UtpEncryptionProduction.cpp — those thunks call into
+# CEncryptedDatagramSocket which reaches into theApp / thePrefs /
+# theStats. The framework half (UtpEncryption.cpp) plus mock
+# encrypt/decrypt delegates installed by the test is enough to verify
+# envelope framing, delegate dispatch, and the encrypt→decrypt
+# roundtrip property. B8's loopback integration test exercises the
+# real RC4 path end-to-end.
+add_executable (UtpEncryptionTest
+	UtpEncryptionTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpKeyFrame.cpp
+)
+
+add_test (NAME UtpEncryptionTest
+	COMMAND UtpEncryptionTest
+)
+
+target_include_directories (UtpEncryptionTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpEncryptionTest
+	muleunit
+)
