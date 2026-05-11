@@ -1470,15 +1470,21 @@ void CKademliaUDPListener::ProcessFindBuddyRequest(const uint8_t *packetData, ui
 		if (!theApp->clientlist->IncomingBuddy(&contact, &BuddyID)) {
 			return; // cancelled for some reason, don't send a response
 		}
+	} else {
+		// Slot 2+ path (Phase D5c): full per-buddy tracking via
+		// IncomingServedBuddy. The client enters our m_servedBuddies
+		// index keyed by buddyID — ProcessCallbackRequest will route
+		// OP_CALLBACK forwards through it via FindServedBuddyByKadID
+		// (older eMule UDP-callback flow), and the rendezvous
+		// coordinator's D2 buddy role can use the same peer for
+		// OP_RENDEZVOUS forwards (NAT-T flow uses general
+		// CClientList::GetClientsByHash, so served-buddy tracking
+		// isn't strictly needed for NAT-T but doesn't conflict).
+		// Capacity / NAT-T-bit gating is already applied above.
+		if (!theApp->clientlist->IncomingServedBuddy(&contact, &BuddyID)) {
+			return;
+		}
 	}
-	// Else (slot 1 taken, requester supports NAT-T): we don't track
-	// the peer in any list (stateless additional-relay mode); we
-	// just respond with FINDBUDDY_RES so the requester knows we're
-	// available as a NAT-T relay. Subsequent OP_RENDEZVOUS from this
-	// peer is routed by source-address through D2's buddy path,
-	// which doesn't need per-buddy state. Full per-served-buddy
-	// tracking (for the older UDP-callback flow) can be added in a
-	// later sub-commit when there's demand for it.
 
 	CMemFile packetdata(34);
 	packetdata.WriteUInt128(BuddyID);
@@ -1530,7 +1536,19 @@ void CKademliaUDPListener::ProcessCallbackRequest(const uint8_t *packetData, uin
 	// Verify packet is expected size
 	CHECK_PACKET_MIN_SIZE(34);
 
-	CUpDownClient* buddy = theApp->clientlist->GetBuddy();
+	CMemFile bioPeek(packetData, lenPacket);
+	CUInt128 checkPeek = bioPeek.ReadUInt128();
+
+	// Phase D5c: try the served-buddy index first — the requester
+	// names its target's Kad ID in the leading 128 bits. If we
+	// serve that LowID via the multi-buddy slot path, route the
+	// callback through their TCP socket. Fall back to the slot-1
+	// m_pBuddy if no served buddy matches (preserves legacy
+	// single-buddy behavior).
+	CUpDownClient* buddy = theApp->clientlist->FindServedBuddyByKadID(checkPeek);
+	if (buddy == NULL) {
+		buddy = theApp->clientlist->GetBuddy();
+	}
 	if (buddy != NULL) {
 		CMemFile bio(packetData, lenPacket);
 		CUInt128 check = bio.ReadUInt128();

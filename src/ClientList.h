@@ -340,6 +340,65 @@ public:
 	bool RequestTCP(Kademlia::CContact* contact, uint8_t connectOptions);
 	void RequestBuddy(Kademlia::CContact* contact, uint8_t connectOptions);
 	bool IncomingBuddy(Kademlia::CContact* contact, Kademlia::CUInt128* buddyID);
+
+	// === Phase D5c: multi-served-buddy infrastructure ============
+	//
+	// In aMule's legacy single-buddy model, m_pBuddy is the ONE
+	// served-buddy slot — slot 1. D5c adds m_servedBuddies as a
+	// parallel list of ADDITIONAL LowID peers we serve, each
+	// indexed by their Kad ID so the older eMule UDP-callback flow
+	// (OP_REASKCALLBACKUDP → KADEMLIA_CALLBACK_REQ →
+	// FindServedBuddyByKadID → forward OP_CALLBACK via the served
+	// LowID's TCP socket) can route correctly when a non-NAT-T peer
+	// uses us as their relay.
+	//
+	// Slot-1 behavior is unchanged (preserves zero regression risk
+	// for aMule's existing single-buddy UDP-callback behavior).
+	// Additional slots are gated on the requester advertising NAT-T
+	// support — mirrors eMuleAI's KademliaUDPListener.cpp:1742-1748
+	// policy.
+	//
+	// Lifecycle: clients enter via IncomingServedBuddy (after
+	// FINDBUDDY_REQ acceptance in ProcessFindBuddyRequest), get
+	// processed through the same Kad state machine as slot-1
+	// clients (KS_INCOMING_BUDDY → KS_CONNECTED_BUDDY on TCP
+	// connection), but in CClientList::Process we route them to the
+	// served-buddy list instead of competing for m_pBuddy. They're
+	// removed when the underlying CUpDownClient is removed from
+	// the client list (RemoveClient).
+
+	// Cap on simultaneous served buddies beyond the single-buddy
+	// slot. eMuleAI uses a configurable max with default 4-8; our
+	// constant is conservative — bump to a pref if real-world
+	// data justifies it.
+	static constexpr uint32 kMaxServedBuddies = 8;
+
+	// Accept an additional served-buddy beyond the single-buddy
+	// slot. Returns true if accepted (created and queued for the
+	// state machine); false on conflict (duplicate IP/port, kad
+	// firewall check in progress, self-connect, capacity full).
+	bool IncomingServedBuddy(Kademlia::CContact* contact,
+	                         Kademlia::CUInt128* buddyID);
+
+	// Look up a served buddy by their Kad ID. Used by
+	// ProcessCallbackRequest to route OP_CALLBACK forwards (older
+	// eMule UDP-callback flow). Returns NULL if not served.
+	CUpDownClient* FindServedBuddyByKadID(const Kademlia::CUInt128& kadID);
+
+	// Number of currently-tracked served buddies (excludes slot 1).
+	uint32 GetServedBuddyCount() const { return static_cast<uint32>(m_servedBuddies.size()); }
+
+	uint32 GetMaxServedBuddies() const { return kMaxServedBuddies; }
+
+	// Returns true if `client` is currently in our served-buddy
+	// list. Used by CClientList::Process to avoid linking served
+	// buddies into the slot-1 m_pBuddy slot when they reach
+	// KS_CONNECTED_BUDDY.
+	bool IsServedBuddy(CUpDownClient* client) const;
+
+	// Remove a client from the served-buddy list. Called from
+	// RemoveClient on disconnection. Idempotent.
+	void RemoveServedBuddy(CUpDownClient* client);
 	void RemoveFromKadList(CUpDownClient* torem);
 	void AddToKadList(CUpDownClient* toadd);
 	bool DoRequestFirewallCheckUDP(const Kademlia::CContact& contact);
@@ -434,6 +493,14 @@ private:
 	CClientRefSet	m_KadSources;
 	CClientRef		m_pBuddy;
 	uint8 m_nBuddyStatus;
+
+	// Phase D5c: served-buddy list — LowIDs we serve as relay
+	// beyond the slot-1 m_pBuddy. Keyed by Kad ID (BuddyID from
+	// the FINDBUDDY_REQ body) so ProcessCallbackRequest can route
+	// OP_CALLBACK forwards to the right TCP socket without
+	// scanning the full client list. Capacity capped at
+	// kMaxServedBuddies.
+	std::map<Kademlia::CUInt128, CClientRef> m_servedBuddies;
 
 	typedef struct {
 		uint32 ip;

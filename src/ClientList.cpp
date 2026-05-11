@@ -132,6 +132,10 @@ void CClientList::RemoveClient(CUpDownClient* client)
 {
 	RemoveFromKadList( client );
 	RemoveDirectCallback( client );
+	// Phase D5c: drop from the served-buddy index too if present;
+	// keeps m_servedBuddies entries from outliving the underlying
+	// CUpDownClient.
+	RemoveServedBuddy( client );
 
 	if ( RemoveIDFromList( client ) ) {
 		// Also remove the ip and hash entries
@@ -609,7 +613,13 @@ void CClientList::Process()
 				//A firewalled client wants us to be his buddy.
 				//If we already have a buddy, we set Kad state to KS_NONE and it's removed in the next cycle.
 				//If not, this client will change to KS_CONNECTED_BUDDY when it connects.
-				if( m_nBuddyStatus == Connected ) {
+				//
+				// Phase D5c: served buddies (additional slots) DON'T
+				// compete with the slot-1 m_pBuddy; they live in
+				// m_servedBuddies. Skip the "already have a buddy"
+				// rejection for them so they can progress to
+				// KS_CONNECTED_BUDDY when TCP connects.
+				if( m_nBuddyStatus == Connected && !IsServedBuddy(cur_client) ) {
 					cur_client->SetKadState(KS_NONE);
 				}
 				break;
@@ -650,6 +660,19 @@ void CClientList::Process()
 			case KS_CONNECTED_BUDDY:
 				//A potential connected buddy client wanting to me in the Kad network
 				//We set our flag to connected to make sure things are still working correctly.
+
+				// Phase D5c: served buddies (additional slots) DON'T
+				// compete with slot 1 — skip both the "set buddy
+				// flag" and the "Link m_pBuddy" paths for them, and
+				// don't override the `buddy` local which tracks
+				// slot-1 status only.
+				if (IsServedBuddy(cur_client)) {
+					// TCP up; the served buddy is ready to route
+					// OP_CALLBACK forwards via ProcessCallbackRequest.
+					// Nothing else to do here.
+					break;
+				}
+
 				buddy = Connected;
 
 				//If m_nBuddyStatus is not connected already, we set this client as our buddy!
@@ -938,6 +961,92 @@ bool CClientList::IncomingBuddy(Kademlia::CContact* contact, Kademlia::CUInt128*
 	AddToKadList(pNewClient);
 	AddClient(pNewClient);
 	return true;
+}
+
+// Phase D5c: incoming additional served-buddy beyond the slot-1
+// m_pBuddy. Same setup as IncomingBuddy (new CUpDownClient enters
+// KS_INCOMING_BUDDY state, awaits TCP from the LowID) but the
+// resulting client is also recorded in m_servedBuddies keyed by
+// the buddyID Kad ID. ClientList::Process recognises served
+// buddies and skips the m_pBuddy linking path.
+bool CClientList::IncomingServedBuddy(Kademlia::CContact* contact,
+                                      Kademlia::CUInt128* buddyID)
+{
+	if (m_servedBuddies.size() >= kMaxServedBuddies) {
+		// Capacity full — caller (ProcessFindBuddyRequest) should
+		// have checked this, but defensive cap here too.
+		return false;
+	}
+
+	uint32_t nContactIP = wxUINT32_SWAP_ALWAYS(contact->GetIPAddress());
+	if (FindClientByIP(nContactIP, contact->GetTCPPort())) {
+		return false;
+	}
+	if (IsKadFirewallCheckIP(nContactIP)) {
+		AddDebugLogLineN(logKadMain,
+			"Kad TCP firewallcheck / ServedBuddy request collision for IP "
+			+ Uint32toStringIP(nContactIP));
+		return false;
+	}
+	if (theApp->GetPublicIP() == nContactIP && thePrefs::GetPort() == contact->GetTCPPort()) {
+		return false; // don't connect ourself
+	}
+
+	// Same client construction as IncomingBuddy. The KadState
+	// remains KS_INCOMING_BUDDY so the existing state machine
+	// drives the TCP-establishment transitions; the routing
+	// difference is applied in CClientList::Process via IsServedBuddy.
+	CUpDownClient* pNewClient = new CUpDownClient(contact->GetTCPPort(),
+	                                              contact->GetIPAddress(),
+	                                              0, 0, NULL, false, true);
+	pNewClient->SetKadPort(contact->GetUDPPort());
+	pNewClient->SetKadState(KS_INCOMING_BUDDY);
+	uint8_t ID[16];
+	contact->GetClientID().ToByteArray(ID);
+	pNewClient->SetUserHash(CMD4Hash(ID));
+	buddyID->ToByteArray(ID);
+	pNewClient->SetBuddyID(ID);
+
+	// Register in the served-buddy index BEFORE adding to the
+	// generic client list, so the Process state-machine sees the
+	// served-buddy mark on its first iteration over this client.
+	m_servedBuddies[*buddyID] = CCLIENTREF(pNewClient,
+		"CClientList::IncomingServedBuddy m_servedBuddies");
+	AddToKadList(pNewClient);
+	AddClient(pNewClient);
+	return true;
+}
+
+CUpDownClient* CClientList::FindServedBuddyByKadID(const Kademlia::CUInt128& kadID)
+{
+	auto it = m_servedBuddies.find(kadID);
+	if (it == m_servedBuddies.end()) {
+		return NULL;
+	}
+	return it->second.GetClient();
+}
+
+bool CClientList::IsServedBuddy(CUpDownClient* client) const
+{
+	if (client == NULL) return false;
+	for (const auto& kv : m_servedBuddies) {
+		if (kv.second.GetClient() == client) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void CClientList::RemoveServedBuddy(CUpDownClient* client)
+{
+	if (client == NULL) return;
+	for (auto it = m_servedBuddies.begin(); it != m_servedBuddies.end(); ) {
+		if (it->second.GetClient() == client) {
+			it = m_servedBuddies.erase(it);
+		} else {
+			++it;
+		}
+	}
 }
 
 void CClientList::RemoveFromKadList(CUpDownClient* torem)
