@@ -25,7 +25,9 @@
 #ifndef NATTRAVERSAL_H
 #define NATTRAVERSAL_H
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 // Capability layer for NAT Traversal (NAT-T) / uTP support.
 //
@@ -104,6 +106,83 @@ inline uint8_t EncodeIntoConnectOptions(uint8_t base_options,
 	}
 	return base_options & ~CONNECT_OPT_BIT_NAT_TRAVERSAL;
 }
+
+// --- Phase C2: OP_RENDEZVOUS / OP_HOLEPUNCH wire format -------------
+//
+// Two new eMule-extension opcodes (carried inside the OP_EMULEPROT
+// envelope, byte 0 = 0xC5, byte 1 = opcode) that drive the rendezvous
+// half of NAT traversal:
+//
+//   OP_RENDEZVOUS = 0xA0  initiator → buddy → uploader path; carries
+//                         the target user's hash, optional file
+//                         context, optional external endpoint.
+//   OP_HOLEPUNCH  = 0xA1  buddy → initiator hint; carries no body,
+//                         the packet's source address is the signal.
+//
+// The wire format for RENDEZVOUS is variable-length to match eMuleAI
+// exactly so the two implementations interop. Mandatory fields are
+// 17 bytes (user_hash + connect_options); optional extension blocks
+// add another 16 bytes (file_hash) and another 6 bytes (ext IPv4 +
+// port). All multi-byte fields are little-endian on the wire to
+// match eMule's CFile / CMemFile serialization convention.
+
+static constexpr std::uint8_t  OP_RENDEZVOUS_OPCODE = 0xA0;
+static constexpr std::uint8_t  OP_HOLEPUNCH_OPCODE  = 0xA1;
+
+// CMD4Hash size — duplicated locally so this header doesn't pull in
+// CMD4Hash.h.
+static constexpr std::size_t   kUserHashSize = 16;
+
+// The mandatory-only RENDEZVOUS body is 17 bytes; with file_hash it's
+// 33; with file_hash + ext endpoint it's 39.
+static constexpr std::size_t   kRendezvousBodyMin  = kUserHashSize + 1;       // 17
+static constexpr std::size_t   kRendezvousBodyMid  = kRendezvousBodyMin + kUserHashSize;        // 33
+static constexpr std::size_t   kRendezvousBodyFull = kRendezvousBodyMid + 4 + 2;                // 39
+
+// Parsed RENDEZVOUS body. has_file_hash / has_ext_endpoint
+// distinguish the optional blocks; the corresponding data fields
+// are only meaningful when the flag is true.
+struct RendezvousRequest {
+	std::uint8_t  target_user_hash[kUserHashSize];
+	std::uint8_t  connect_options;       // eD2k byCryptOptions byte
+	bool          has_file_hash;
+	std::uint8_t  target_file_hash[kUserHashSize];   // valid iff has_file_hash
+	bool          has_ext_endpoint;
+	std::uint32_t requester_ext_ip;      // host byte order; valid iff has_ext_endpoint
+	std::uint16_t requester_ext_port;    // host byte order; valid iff has_ext_endpoint
+};
+
+// Encode a RendezvousRequest into the body bytes (just the payload
+// after the OP_EMULEPROT / OP_RENDEZVOUS preamble — the caller wraps
+// it via the existing CPacket OP_EMULEPROT machinery on send).
+//
+// has_file_hash / has_ext_endpoint on the input struct determine
+// which optional blocks are appended. ext_endpoint without
+// file_hash is allowed by the wire format only if file_hash is
+// emitted as a zero (eMuleAI's "no file" sentinel) — Encode does
+// that automatically when has_ext_endpoint && !has_file_hash.
+//
+// Returns false on NULL out (defensive). out is cleared on entry.
+bool EncodeRendezvous(const RendezvousRequest& req,
+                      std::vector<std::uint8_t>& out);
+
+// Decode RENDEZVOUS body bytes. Length must be >= kRendezvousBodyMin;
+// trailing bytes past the recognised optional blocks are silently
+// ignored (UDP can deliver padding). has_file_hash and
+// has_ext_endpoint flags on `out` indicate which blocks were
+// present. Returns false on short buffer or NULL inputs.
+bool DecodeRendezvous(const std::uint8_t* buf, std::size_t len,
+                      RendezvousRequest& out);
+
+// HOLEPUNCH has no body. The pair below exists for symmetry and to
+// future-proof callers — if a future protocol version adds payload
+// bytes, callers can extend the helpers without touching the
+// dispatch sites.
+bool EncodeHolePunch(std::vector<std::uint8_t>& out);
+
+// Decode a HOLEPUNCH body. Today this is a no-op (body must be
+// empty or trailing-padding-tolerant); returns false on NULL buf.
+bool DecodeHolePunch(const std::uint8_t* buf, std::size_t len);
 
 } // namespace NatTraversal
 

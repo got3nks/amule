@@ -550,3 +550,25 @@ if (ENABLE_NAT_T)
 		utp
 	)
 endif()
+
+# Phase C2 of the NAT-T port: OP_RENDEZVOUS / OP_HOLEPUNCH wire-format
+# encoders / parsers. Pure-function byte-level tests with no libutp
+# dependency; compiled unconditionally (matches NatTraversalTest
+# pattern from Phase A3).
+add_executable (NatTraversalRendezvousTest
+	NatTraversalRendezvousTest.cpp
+	${CMAKE_SOURCE_DIR}/src/NatTraversal.cpp
+)
+
+add_test (NAME NatTraversalRendezvousTest
+	COMMAND NatTraversalRendezvousTest
+)
+
+target_include_directories (NatTraversalRendezvousTest
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (NatTraversalRendezvousTest
+	muleunit
+)

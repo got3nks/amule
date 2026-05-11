@@ -28,6 +28,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		KnownFileList.cpp
 		ListenSocket.cpp
 		MuleUDPSocket.cpp
+		NatTraversal.cpp
 		SearchFile.cpp
 		SearchList.cpp
 		ServerConnect.cpp
