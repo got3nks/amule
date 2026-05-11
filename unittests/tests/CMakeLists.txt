@@ -596,3 +596,30 @@ target_include_directories (NatTraversalCoordinatorTest
 target_link_libraries (NatTraversalCoordinatorTest
 	muleunit
 )
+
+# Phase D6 of the NAT-T port: 3-node integration test for the
+# rendezvous state machine. Stands up three independent
+# CNatTraversalCoordinator instances (requester / buddy / endpoint)
+# and connects them via an in-process router, mirroring the
+# wire-level dispatch that CClientUDPSocket performs in production.
+# The actual uTP handshake is already covered by B8's loopback
+# test; D6 verifies rendezvous correctness across nodes.
+add_executable (NatTraversalIntegrationTest
+	NatTraversalIntegrationTest.cpp
+	${CMAKE_SOURCE_DIR}/src/NatTraversalCoordinator.cpp
+	${CMAKE_SOURCE_DIR}/src/NatTraversal.cpp
+)
+
+add_test (NAME NatTraversalIntegrationTest
+	COMMAND NatTraversalIntegrationTest
+)
+
+target_include_directories (NatTraversalIntegrationTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (NatTraversalIntegrationTest
+	muleunit
+)

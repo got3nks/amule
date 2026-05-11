@@ -228,10 +228,15 @@ public:
 	// between test cases). Production should never call this.
 	void ClearPendingForTesting();
 
-private:
+	// Construct an independent coordinator instance. Production code
+	// must use Instance() — the singleton owns the process-wide
+	// rendezvous state. Tests instantiate directly (e.g. D6's 3-node
+	// in-process integration test stands up three coordinators, one
+	// per simulated peer).
 	CNatTraversalCoordinator() = default;
 	~CNatTraversalCoordinator() = default;
 
+private:
 	CNatTraversalCoordinator(const CNatTraversalCoordinator&) = delete;
 	CNatTraversalCoordinator& operator=(const CNatTraversalCoordinator&) = delete;
 
