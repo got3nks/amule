@@ -126,6 +126,76 @@ TEST(UtpLayer, OnReadReassemblesChunkedDeliveries)
 }
 
 
+// Phase E3: a registered data-available callback fires once per
+// OnRead delivery that actually appends bytes. Zero-byte OnRead
+// (NULL data or len==0) skips the callback. Multiple deliveries
+// fire multiple callbacks — the receiver (production:
+// CoreNotify_LibSocketReceive) is expected to coalesce or
+// be idempotent.
+TEST(UtpLayer, DataAvailableCallbackFiresPerOnRead)
+{
+	utp_context* ctx = utp_init(2);
+	ASSERT_TRUE(ctx != NULL);
+
+	{
+		CUtpLayer layer(ctx);
+
+		int call_count = 0;
+		layer.SetDataAvailableCallback([&call_count]() {
+			++call_count;
+		});
+
+		const std::uint8_t chunk1[] = { 'a','b','c' };
+		const std::uint8_t chunk2[] = { 'd','e','f','g' };
+		layer.OnRead(chunk1, sizeof(chunk1));
+		layer.OnRead(chunk2, sizeof(chunk2));
+		ASSERT_EQUALS(2, call_count);
+
+		// Zero-byte OnRead does not fire the callback (no bytes appended).
+		layer.OnRead(nullptr, 0);
+		ASSERT_EQUALS(2, call_count);
+		layer.OnRead(chunk1, 0);
+		ASSERT_EQUALS(2, call_count);
+
+		// Drain doesn't fire the callback either — only inbound bytes do.
+		std::uint8_t out[16];
+		std::int64_t got = layer.Recv(out, sizeof(out));
+		ASSERT_EQUALS((std::int64_t)7, got);
+		ASSERT_EQUALS(2, call_count);
+	}
+
+	utp_destroy(ctx);
+}
+
+// Phase E3: SetDataAvailableCallback(nullptr) detaches a previously
+// registered callback — useful for teardown when the owning socket
+// goes away before the layer (production: detach before deleting
+// the socket so the layer can outlive briefly without dangling
+// references).
+TEST(UtpLayer, DataAvailableCallbackCanBeDetached)
+{
+	utp_context* ctx = utp_init(2);
+	ASSERT_TRUE(ctx != NULL);
+
+	{
+		CUtpLayer layer(ctx);
+
+		int call_count = 0;
+		layer.SetDataAvailableCallback([&call_count]() { ++call_count; });
+
+		const std::uint8_t chunk[] = { 'x','y','z' };
+		layer.OnRead(chunk, sizeof(chunk));
+		ASSERT_EQUALS(1, call_count);
+
+		layer.SetDataAvailableCallback(nullptr);
+
+		layer.OnRead(chunk, sizeof(chunk));
+		ASSERT_EQUALS(1, call_count);
+	}
+
+	utp_destroy(ctx);
+}
+
 // Partial Recv into a small buffer returns only what fits; leftover
 // bytes stay queued for the next call. Validates FIFO ordering across
 // multiple drains (not just within a single Recv).

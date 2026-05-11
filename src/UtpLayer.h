@@ -65,6 +65,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 struct sockaddr;
@@ -208,6 +209,18 @@ public:
 	// the number copied. Non-blocking; FIFO drain.
 	std::int64_t Recv(void* buf, std::size_t count);
 
+	// Phase E3: install a "data available" notification. Fires from
+	// OnRead each time new bytes are appended to the read buffer,
+	// AFTER the buffer mutation but WHILE libutp's RuntimeLock is
+	// still held. The callback MUST NOT re-acquire RuntimeLock and
+	// MUST NOT call back into libutp synchronously — its only safe
+	// action is to schedule async work (e.g. CoreNotify_LibSocketReceive
+	// to wake the owning CClientTCPSocket's OnReceive on the main
+	// thread). Production wires this in CUpDownClient::OnNatTraversalComplete
+	// success path; tests can set it to a counter for assertions.
+	using DataAvailableCallback = std::function<void()>;
+	void SetDataAvailableCallback(DataAvailableCallback cb);
+
 	// Mark the layer closed (state → CLOSED) and request libutp to
 	// FIN the connection. Idempotent.
 	void Close();
@@ -291,6 +304,12 @@ private:
 	// handshake (utp_connect). Responder waits for the SYN to arrive
 	// via UTP_ON_ACCEPT.
 	bool m_initiator;
+
+	// Phase E3: fires from OnRead after each buffer append. Used by
+	// CUpDownClient to wake the owning CClientTCPSocket's OnReceive
+	// via CoreNotify_LibSocketReceive (main-thread post). NULL by
+	// default — when unset, OnRead just appends bytes silently.
+	DataAvailableCallback m_data_available_cb;
 };
 
 #endif // ENABLE_NAT_T

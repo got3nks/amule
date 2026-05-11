@@ -425,6 +425,23 @@ void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 	if (m_socket != NULL) {
 		utp_read_drained(m_socket);
 	}
+
+	// Phase E3: notify the owning CClientTCPSocket (or test stub) that
+	// fresh bytes are in the read buffer. Callback runs while we still
+	// hold libutp's RuntimeLock; production wires it to a same-tread
+	// async post (CoreNotify_LibSocketReceive), so the callback returns
+	// immediately and the real OnReceive dispatch happens on the
+	// main thread. Re-entrant libutp calls from the callback would
+	// deadlock — contract documented at SetDataAvailableCallback.
+	if (to_copy > 0 && m_data_available_cb) {
+		m_data_available_cb();
+	}
+}
+
+void CUtpLayer::SetDataAvailableCallback(DataAvailableCallback cb)
+{
+	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+	m_data_available_cb = std::move(cb);
 }
 
 void CUtpLayer::OnError(int /*error_code*/)

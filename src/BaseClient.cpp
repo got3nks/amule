@@ -1503,25 +1503,74 @@ void CUpDownClient::OnNatTraversalComplete(bool ok, CUtpLayer* layer)
 {
 #ifdef ENABLE_NAT_T
 	m_fNatTraversalInFlight = 0;
-	if (ok && layer != nullptr) {
-		// Phase E1: success path is stubbed. E2/E3 install the layer
-		// as a CClientTCPSocket-shaped facade and drive
-		// ConnectionEstablished + Hello handshake.
+	if (!ok || layer == nullptr) {
 		AddDebugLogLineN(logClient,
-			CFormat(wxT("NAT-T rendezvous succeeded for %s — layer not yet wired (E2/E3 pending), dropping"))
+			CFormat(wxT("NAT-T rendezvous failed for %s — falling back to LowID-to-LowID"))
 				% GetFullIP());
-		delete layer;
 		if (GetDownloadState() == DS_CONNECTING || GetDownloadState() == DS_WAITCALLBACK) {
 			SetDownloadState(DS_LOWTOLOWIP);
 		}
+		delete layer;  // safe on null
 		return;
 	}
+
+	// Phase E3: success path. Stand up a CClientTCPSocket whose
+	// Write/Read seam (E2) routes through the connected uTP layer,
+	// then drive the existing ConnectionEstablished flow (Hello
+	// packet → handshake → file transfer) just like a TCP connection.
+	// Byte-level transparency through the eD2k stack — the upper
+	// layers don't know the transport is uTP.
 	AddDebugLogLineN(logClient,
-		CFormat(wxT("NAT-T rendezvous failed for %s — falling back to LowID-to-LowID"))
+		CFormat(wxT("NAT-T rendezvous succeeded for %s — attaching uTP layer + starting handshake"))
 			% GetFullIP());
-	if (GetDownloadState() == DS_CONNECTING || GetDownloadState() == DS_WAITCALLBACK) {
-		SetDownloadState(DS_LOWTOLOWIP);
+
+	if (m_socket != nullptr) {
+		// Stale socket from an earlier attempt; drop before the
+		// fresh one takes m_socket's slot via SetSocket below.
+		m_socket->Safe_Delete();
+		m_socket = nullptr;
 	}
+	m_socket = new CClientTCPSocket(this, thePrefs::GetProxyData());
+
+	// Attach the layer BEFORE installing the data-available callback
+	// so the seam is live when bytes arrive. AttachUtpLayer also
+	// flips byConnected = ES_CONNECTED synthetically — the rest of
+	// CEMSocket sees a connected socket.
+	m_socket->AttachUtpLayer(layer);
+
+	// Wake the socket's OnReceive on the main thread when libutp
+	// delivers fresh bytes. CoreNotify_LibSocketReceive posts via
+	// the same mechanism boost::asio's HandleRead uses (GuiEvents
+	// async dispatch) — so OnReceive runs on the main thread with
+	// the same synchronisation guarantees as a regular TCP read.
+	// The callback fires under libutp's RuntimeLock; it MUST NOT
+	// re-acquire that lock — CoreNotify_* is async post only.
+	CClientTCPSocket* sock = m_socket;
+	layer->SetDataAvailableCallback([sock]() {
+		CoreNotify_LibSocketReceive(sock, 0);
+	});
+
+	// Encryption: same setup that CUpDownClient::Connect (TCP path)
+	// does. Crypt-layer support and key-derivation depend on whether
+	// we have the peer's user hash + their crypt prefs — the latter
+	// arrived via the Hello / source-exchange that gave us the peer
+	// in the first place. SetConnectionEncryption sets the
+	// CEncryptedStreamSocket state machine; the obfuscation handshake
+	// proceeds over uTP transparently (same byte flow as TCP).
+	if (HasValidHash() && SupportsCryptLayer()
+	    && thePrefs::IsClientCryptLayerSupported()
+	    && (RequestsCryptLayer() || thePrefs::IsClientCryptLayerRequested())) {
+		m_socket->SetConnectionEncryption(true, GetUserHash().GetHash(), false);
+	} else {
+		m_socket->SetConnectionEncryption(false, nullptr, false);
+	}
+
+	// Drive ConnectionEstablished (sends Hello + transitions state).
+	// AttachUtpLayer already set byConnected = ES_CONNECTED so the
+	// existing flow doesn't try to Connect() the underlying TCP
+	// socket (which would attempt a real boost::asio connect — wrong
+	// for uTP transport).
+	ConnectionEstablished();
 #else
 	(void)ok; (void)layer;
 #endif
