@@ -50,6 +50,7 @@
 #include "kademlia/utils/KadUDPKey.h"
 #include <zlib.h>
 #include "EncryptedDatagramSocket.h"
+#include "NatTraversal.h"
 #ifdef ENABLE_NAT_T
 #include "UtpEncryption.h"
 #include "UtpEnvironment.h"
@@ -460,6 +461,48 @@ void CClientUDPSocket::ProcessPacket(uint8_t* packet, int16 size, int8 opcode, u
 			}
 			break;
 		}
+#ifdef ENABLE_NAT_T
+		case NatTraversal::OP_RENDEZVOUS_OPCODE: {
+			// Phase C1 dispatch — parse the body and log. The full
+			// rendezvous state-machine handler lives in the NAT-T
+			// coordinator that arrives in Phase D (cluster 8). Until
+			// then we just verify the wire format end-to-end and
+			// drop. Vanilla aMule builds without ENABLE_NAT_T fall
+			// through to the default branch and AddDownOverheadOther
+			// — same interop behavior as any unknown opcode.
+			theStats::AddDownOverheadOther(size);
+			NatTraversal::RendezvousRequest req;
+			if (NatTraversal::DecodeRendezvous(packet,
+			                                  static_cast<std::size_t>(size),
+			                                  req)) {
+				AddDebugLogLineN(logClientUDP, CFormat(
+					"NAT-T: received OP_RENDEZVOUS from %s "
+					"(connect_options=0x%02x, has_file_hash=%d, "
+					"has_ext_endpoint=%d) — Phase D handler not wired yet")
+					% Uint32_16toStringIP_Port(host, port)
+					% (unsigned)req.connect_options
+					% (int)req.has_file_hash
+					% (int)req.has_ext_endpoint);
+			} else {
+				AddDebugLogLineN(logClientUDP, CFormat(
+					"NAT-T: malformed OP_RENDEZVOUS from %s "
+					"(size=%d, rejected by DecodeRendezvous)")
+					% Uint32_16toStringIP_Port(host, port) % size);
+			}
+			break;
+		}
+		case NatTraversal::OP_HOLEPUNCH_OPCODE: {
+			// HOLEPUNCH carries no body — the source address is the
+			// signal. Phase D will use it to drive the symmetric-NAT
+			// hole-punch retry; here we just log + count.
+			theStats::AddDownOverheadOther(size);
+			AddDebugLogLineN(logClientUDP, CFormat(
+				"NAT-T: received OP_HOLEPUNCH from %s (size=%d) — "
+				"Phase D handler not wired yet")
+				% Uint32_16toStringIP_Port(host, port) % size);
+			break;
+		}
+#endif // ENABLE_NAT_T
 		default:
 			theStats::AddDownOverheadOther(size);
 	}
