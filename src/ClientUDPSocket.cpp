@@ -54,6 +54,7 @@
 #include "UtpEncryption.h"
 #include "UtpEnvironment.h"
 #include "UtpKeyFrame.h"
+#include "UtpTimer.h"
 #endif
 
 //
@@ -84,6 +85,14 @@ CClientUDPSocket::CClientUDPSocket(const amuleIPV4Address& address, const CProxy
 	// the unlikely event of multiple CClientUDPSocket lifetimes per
 	// process) just re-overwrites the delegate pointers.
 	UtpEncryption::InstallProductionDelegates();
+
+	// Phase B7: start the periodic libutp tick driver. The worker
+	// thread fires every 50 ms, locks UtpEnvironment::RuntimeLock,
+	// and runs utp_check_timeouts + utp_issue_deferred_acks against
+	// the global context. Idempotent (Start() while already running
+	// is a no-op). If utp_init failed above, the tick safely no-ops
+	// each iteration (GetContext() returns NULL).
+	UtpTimer::Start();
 #endif
 }
 
@@ -91,6 +100,12 @@ CClientUDPSocket::CClientUDPSocket(const amuleIPV4Address& address, const CProxy
 CClientUDPSocket::~CClientUDPSocket()
 {
 #ifdef ENABLE_NAT_T
+	// Phase B7: stop the tick driver before tearing down the libutp
+	// context. Stop() joins the worker thread, so by the time it
+	// returns no callback is in flight that could touch a destroyed
+	// context. Then it's safe to destroy.
+	UtpTimer::Stop();
+
 	// Tear down the global libutp context. Safe to call even if Init()
 	// failed — Shutdown() is a no-op when there is no live context.
 	UtpEnvironment::Shutdown();

@@ -447,3 +447,40 @@ if (ENABLE_NAT_T)
 		utp
 	)
 endif()
+
+# Phase B7 of the NAT-T port: periodic libutp tick driver. The test
+# runs the worker thread without a live utp_context — the worker's
+# null-context skip path is exercised, and the tick counter is the
+# direct proxy for "utp_check_timeouts was called approximately N
+# times". UtpTimer depends on UtpEnvironment (for RuntimeLock +
+# GetContext) so both .cpps go into the test target. When
+# ENABLE_NAT_T=OFF the test compiles to the FeatureDisabled
+# tautology + skips the libutp link.
+add_executable (UtpTimerTest
+	UtpTimerTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpTimer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+)
+
+add_test (NAME UtpTimerTest
+	COMMAND UtpTimerTest
+)
+
+target_include_directories (UtpTimerTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpTimerTest
+	muleunit
+)
+
+if (ENABLE_NAT_T)
+	target_link_libraries (UtpTimerTest
+		utp
+	)
+endif()

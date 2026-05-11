@@ -50,6 +50,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		UtpEnvironment.cpp
 		UtpKeyFrame.cpp
 		UtpLayer.cpp
+		UtpTimer.cpp
 	)
 endif()
 
