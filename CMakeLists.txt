@@ -83,6 +83,20 @@ if (ENABLE_UPNP)
 endif()
 
 if (ENABLE_NAT_T)
+	# Phase E (E2/E3): NAT-T's uTP transport is wired into the
+	# CEncryptedStreamSocket::Write/Read seam, which routes inbound
+	# bytes back through boost::asio's main strand. The wxSocket
+	# fallback path uses a different event-marshalling mechanism we
+	# deliberately don't port (it's legacy). Enforce the dependency
+	# at configure time — clear error beats a confusing runtime
+	# wake-up bug.
+	if (NOT ASIO_SOCKETS)
+		message (FATAL_ERROR
+			"ENABLE_NAT_T=ON requires ASIO_SOCKETS=ON (boost::asio). "
+			"aMule defaults to ENABLE_BOOST=ON which auto-sets "
+			"ASIO_SOCKETS — make sure boost::asio headers are installed. "
+			"To turn NAT-T off instead: pass -DENABLE_NAT_T=OFF.")
+	endif()
 	include (cmake/utp.cmake)
 endif()
 

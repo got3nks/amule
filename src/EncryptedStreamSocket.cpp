@@ -81,6 +81,9 @@ Basic Obfuscated Handshake Protocol Client <-> Server:
 	- DH Agreement Specifics: sizeof(a) and sizeof(b) = 128 Bits, g = 2, p = dh768_p (see below), sizeof p, s, etc. = 768 bits
 */
 #include "EncryptedStreamSocket.h"
+#ifdef ENABLE_NAT_T
+#include "UtpLayer.h"	// CUtpLayer::Send / Recv for the E2 transport seam
+#endif
 #include "amule.h"
 #include "Logger.h"
 #include "Preferences.h"
@@ -183,6 +186,27 @@ void CEncryptedStreamSocket::SetConnectionEncryption(bool bEnabled, const uint8_
 // together with the fact that each byte must pass the keystream only once
 int CEncryptedStreamSocket::Write(const void* lpBuf, uint32_t nBufLen)
 {
+#ifdef ENABLE_NAT_T
+	// Phase E2: when in uTP-transport mode, route post-obfuscation
+	// bytes into the uTP layer instead of boost::asio. The layer
+	// above (CEMSocket queues + obfuscation state machine) has
+	// already prepared the bytes; we just hand them to libutp.
+	//
+	// Mirrors eMuleAI's `CUtpSocket::Send` (`UtpSocket.cpp`) — same
+	// position in the byte-flow pipeline, different mechanism
+	// (composition vs CAsyncSocketExLayer layer injection).
+	if (m_pUtpLayer != nullptr) {
+		// CUtpLayer::Send returns int64 of bytes accepted into its
+		// outbound buffer (0..count). Negative → closed. Short
+		// accepts are normal (libutp CWND backpressure); the caller
+		// stack handles short-write same as on a real socket.
+		std::int64_t accepted = m_pUtpLayer->Send(lpBuf, nBufLen);
+		if (accepted < 0) {
+			return 0;  // layer closed; treat as connection lost
+		}
+		return static_cast<int>(accepted);
+	}
+#endif
 	//printf("Starting write for %s\n", (const char*) unicode2char(GetPeer()));
 	if (!IsEncryptionLayerReady()) {
 		wxFAIL;
@@ -212,8 +236,34 @@ int CEncryptedStreamSocket::Write(const void* lpBuf, uint32_t nBufLen)
 
 int CEncryptedStreamSocket::Read(void* lpBuf, uint32_t nBufLen)
 {
+#ifdef ENABLE_NAT_T
+	// Phase E2: in uTP-transport mode, drain bytes from the uTP layer's
+	// read buffer instead of boost::asio. CUtpLayer::Recv is
+	// non-blocking FIFO drain (B3 design); short-reads are normal —
+	// the caller's OnReceive loop iterates as long as bytes are
+	// available, same contract as the boost::asio path.
+	//
+	// CUtpLayer's read buffer is fed by libutp's on_read callback
+	// (fires from the boost::asio strand or UtpTimer thread under
+	// the runtime lock); the threading marshall that wakes the
+	// socket's OnReceive handler when bytes arrive lives in E3.
+	if (m_pUtpLayer != nullptr) {
+		std::int64_t copied = m_pUtpLayer->Recv(lpBuf, nBufLen);
+		m_nObfusicationBytesReceived = (copied < 0) ? 0 : static_cast<uint32_t>(copied);
+		m_bFullReceive = m_nObfusicationBytesReceived == (uint32_t)nBufLen;
+		if (m_nObfusicationBytesReceived == 0) {
+			return 0;
+		}
+		// Fall through to the existing decrypt/state-machine branches
+		// below — they treat the bytes identically regardless of
+		// transport.
+	} else {
+#endif
 	m_nObfusicationBytesReceived = CSocketClientProxy::Read(lpBuf, nBufLen);
 	m_bFullReceive = m_nObfusicationBytesReceived == (uint32)nBufLen;
+#ifdef ENABLE_NAT_T
+	}
+#endif
 
 	//printf("Read %i bytes on %s, socket %p\n", m_nObfusicationBytesReceived, (const char*) unicode2char(GetPeer()), this);
 

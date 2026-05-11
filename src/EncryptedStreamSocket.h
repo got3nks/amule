@@ -44,6 +44,10 @@
 
 #include "RC4Encrypt.h"
 
+#ifdef ENABLE_NAT_T
+class CUtpLayer;
+#endif
+
 #define ERR_WRONGHEADER			0x01
 #define ERR_TOOBIG			0x02
 #define ERR_ENCRYPTION			0x03
@@ -102,6 +106,21 @@ public:
 	uint8_t	m_dbgbyEncryptionSupported;
 	uint8_t	m_dbgbyEncryptionRequested;
 	uint8_t	m_dbgbyEncryptionMethodSet;
+
+#ifdef ENABLE_NAT_T
+	// Phase E2: when non-null, Write/Read route through this uTP
+	// layer instead of CSocketClientProxy's boost::asio path.
+	// Composition (not ownership transfer) — the layer is owned by
+	// the rendezvous-success callback chain; this socket holds a
+	// borrowed pointer that's nulled out before the layer is deleted.
+	// See `.archive/eMuleAI-nat-t-implementation-plan.md` Phase E
+	// status section for the design rationale.
+	//
+	// Set via CEMSocket::AttachUtpLayer (one level higher in the
+	// inheritance chain, where byConnected lives — uTP attach also
+	// synthetically transitions to ES_CONNECTED).
+	CUtpLayer* m_pUtpLayer = nullptr;
+#endif
 
 protected:
 	int	Write(const void* lpBuf, uint32_t nBufLen);

@@ -33,6 +33,9 @@
 #include "ThrottledSocket.h"	// Needed for ThrottledFileSocket
 
 class CPacket;
+#ifdef ENABLE_NAT_T
+class CUtpLayer;
+#endif
 
 #define ERR_WRONGHEADER		0x01
 #define ERR_TOOBIG			0x02
@@ -86,6 +89,27 @@ public:
 	// and latency-sensitive and would stall silently under a
 	// download cap tight enough to exhaust the throttler bucket.
 	virtual bool	IsDownloadThrottled() const { return true; }
+
+#ifdef ENABLE_NAT_T
+	// Phase E2: install a uTP transport layer underneath this socket.
+	// After this call, Write/Read on the inherited CEncryptedStreamSocket
+	// route through the layer instead of boost::asio. Also flips
+	// byConnected to ES_CONNECTED synthetically — the underlying TCP
+	// socket was never connected (and never will be) because the
+	// rendezvous coordinator already established the uTP transport
+	// before we got here. See Phase E2 in the implementation plan.
+	//
+	// Composition only; the layer is NOT owned by this socket. The
+	// rendezvous-success callback chain owns it. Pass nullptr to
+	// detach (used during teardown). Defined inline rather than out-of-
+	// line because CEMSocket doesn't otherwise have a NAT-T translation
+	// unit, and keeping the cpp file untouched minimises rebuild churn.
+	void AttachUtpLayer(CUtpLayer* layer) {
+		m_pUtpLayer = layer;
+		byConnected = (layer != nullptr) ? ES_CONNECTED : byConnected;
+	}
+	bool IsUtpTransport() const { return m_pUtpLayer != nullptr; }
+#endif
 
 	//protected:
 	// these functions are public on our code because of the amuleDlg::socketHandler
