@@ -30,6 +30,12 @@
 #include "updownclient.h"	// Needed for CUpDownClient
 #include "SharedFileList.h"	// Needed for CSharedFileList
 #include "NatTraversal.h"	// Needed for NatTraversal::CONNECT_OPT_BIT_NAT_TRAVERSAL
+#ifdef ENABLE_NAT_T
+#include "NatTraversalCoordinator.h"	// rendezvous coordinator (Phase D)
+#include "UtpLayer.h"	// CUtpLayer ptr type for on-complete callback
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#endif
 
 #include <protocol/Protocols.h>
 #include <protocol/ed2k/Client2Client/TCP.h>
@@ -283,6 +289,8 @@ void CUpDownClient::Init()
 	m_fSupportsSourceEx2 = 0;
 	m_fSupportsCaptcha = 0;
 	m_fDirectUDPCallback = 0;
+	m_fSupportsNatTraversal = 0;
+	m_fNatTraversalInFlight = 0;
 	m_dwDirectCallbackTimeout = 0;
 
 	m_hasbeenobfuscatinglately = false;
@@ -356,6 +364,8 @@ void CUpDownClient::ClearHelloProperties()
 	m_fSupportsSourceEx2 = 0;
 	m_fSupportsCaptcha = 0;
 	m_fDirectUDPCallback = 0;
+	m_fSupportsNatTraversal = 0;
+	m_fNatTraversalInFlight = 0;
 	m_bIsHybrid = false;
 	m_bIsML = false;
 	m_fNoViewSharedFiles = true;	// that's a sensible default to assume until we get the real value
@@ -1390,6 +1400,134 @@ bool CUpDownClient::Disconnected(const wxString& DEBUG_ONLY(strReason), bool bFr
 	return bDelete;
 }
 
+// Phase E1: attempt to reach a LowID peer via NAT-T rendezvous.
+// Returns true if the rendezvous request was successfully handed
+// off to the coordinator (the caller defers DS_LOWTOLOWIP and waits
+// for OnNatTraversalComplete). Returns false on any eligibility miss
+// so the caller falls through to the existing LowID-callback /
+// LowID-to-LowID error fallback.
+//
+// Eligibility (all must hold):
+//   - ENABLE_NAT_T compiled in
+//   - This peer advertised NAT-T support via Hello/DirectCallbackReq
+//   - We have the peer's external UDP endpoint (IP + Kad UDP port)
+//   - No prior rendezvous is already in flight for this client
+//
+// E1 NOTE: success is currently stubbed in OnNatTraversalComplete —
+// the layer is deleted + we transition to DS_LOWTOLOWIP. E2 wires
+// the layer into a CClientTCPSocket-shaped facade; E3 hooks it up
+// to ConnectionEstablished and the Hello handshake.
+bool CUpDownClient::TryNatTraversal()
+{
+#ifdef ENABLE_NAT_T
+	if (m_fNatTraversalInFlight) {
+		// Already racing the coordinator — don't fire a second one.
+		return true;
+	}
+	if (!SupportsNatTraversal()) {
+		return false;
+	}
+	// Need the peer's external UDP endpoint to drive the post-HOLEPUNCH
+	// uTP connect. Same pair the DirectCallback path uses (GetConnectIP +
+	// GetKadPort) — if either is zero we have nothing to connect to.
+	const uint32 peer_ip   = GetConnectIP();
+	const uint16 peer_port = GetKadPort();
+	if (peer_ip == 0 || peer_port == 0) {
+		return false;
+	}
+
+	// Capture by hash (POD, safe across thread boundaries). On callback
+	// fire-time we look the client up in CClientList — if it was deleted
+	// in the meantime, the layer is dropped cleanly. Mirrors the
+	// AddDirectCallbackClient pattern used by DirectCallback.
+	// E1 NOTE: the callback fires from the rendezvous coordinator,
+	// possibly on UtpTimer's thread. Accessing theApp / CClientList
+	// from a non-main thread is unsafe in general; documenting as a
+	// known concern for E3 to address via wxPostEvent or equivalent.
+	CMD4Hash target_hash = GetUserHash();
+	auto on_complete = [target_hash](bool ok, CUtpLayer* layer) {
+		CClientList::SourceList sources = theApp->clientlist->GetClientsByHash(target_hash);
+		if (sources.empty()) {
+			// Every CUpDownClient pointing at this user vanished.
+			// Drop the layer cleanly.
+			delete layer;
+			return;
+		}
+		// Hand off to the first in-flight client we find; if none of
+		// them are flagged, fall through to the first one (the
+		// rendezvous still completed — its owner may have been
+		// deleted but a replacement exists).
+		CUpDownClient* target = nullptr;
+		for (const CClientRef& ref : sources) {
+			CUpDownClient* c = ref.GetClient();
+			if (c && c->IsNatTraversalInFlight()) {
+				target = c;
+				break;
+			}
+		}
+		if (target == nullptr) {
+			target = sources.front().GetClient();
+		}
+		if (target == nullptr) {
+			delete layer;
+			return;
+		}
+		target->OnNatTraversalComplete(ok, layer);
+	};
+
+	sockaddr_in target_addr;
+	std::memset(&target_addr, 0, sizeof(target_addr));
+	target_addr.sin_family      = AF_INET;
+	// GetConnectIP() returns network-byte-order on aMule's convention;
+	// sockaddr_in expects network-byte-order too. No swap needed.
+	target_addr.sin_addr.s_addr = peer_ip;
+	target_addr.sin_port        = htons(peer_port);
+
+	NatTraversal::CNatTraversalCoordinator::Instance().RequestRendezvous(
+		GetUserHash().GetHash(),
+		reinterpret_cast<sockaddr*>(&target_addr),
+		sizeof(target_addr),
+		std::move(on_complete));
+
+	m_fNatTraversalInFlight = 1;
+	AddDebugLogLineN(logClient,
+		CFormat(wxT("NAT-T rendezvous requested for LowID peer %s (kad UDP %u)"))
+			% GetFullIP() % peer_port);
+	return true;
+#else
+	return false;
+#endif
+}
+
+void CUpDownClient::OnNatTraversalComplete(bool ok, CUtpLayer* layer)
+{
+#ifdef ENABLE_NAT_T
+	m_fNatTraversalInFlight = 0;
+	if (ok && layer != nullptr) {
+		// Phase E1: success path is stubbed. E2/E3 install the layer
+		// as a CClientTCPSocket-shaped facade and drive
+		// ConnectionEstablished + Hello handshake.
+		AddDebugLogLineN(logClient,
+			CFormat(wxT("NAT-T rendezvous succeeded for %s — layer not yet wired (E2/E3 pending), dropping"))
+				% GetFullIP());
+		delete layer;
+		if (GetDownloadState() == DS_CONNECTING || GetDownloadState() == DS_WAITCALLBACK) {
+			SetDownloadState(DS_LOWTOLOWIP);
+		}
+		return;
+	}
+	AddDebugLogLineN(logClient,
+		CFormat(wxT("NAT-T rendezvous failed for %s — falling back to LowID-to-LowID"))
+			% GetFullIP());
+	if (GetDownloadState() == DS_CONNECTING || GetDownloadState() == DS_WAITCALLBACK) {
+		SetDownloadState(DS_LOWTOLOWIP);
+	}
+#else
+	(void)ok; (void)layer;
+#endif
+}
+
+
 //Returned bool is not if the TryToConnect is successful or not..
 //false means the client was deleted!
 //true means the client was not deleted!
@@ -1453,6 +1591,22 @@ bool CUpDownClient::TryToConnect(bool bIgnoreMaxCon)
 
 	if (HasLowID()) {
 		if (!theApp->CanDoCallback(GetServerIP(), GetServerPort())) {
+#ifdef ENABLE_NAT_T
+			// Phase E1: LowID→LowID is the gap NAT-T closes. If both
+			// ends advertise NAT-T support, attempt rendezvous before
+			// giving up. The attempt is asynchronous — on success,
+			// OnNatTraversalComplete is called with the connected uTP
+			// layer; on timeout/failure, it falls through to
+			// DS_LOWTOLOWIP. The TCP-callback path below is reached
+			// only when NAT-T is ineligible (peer doesn't advertise
+			// support, or we don't have their external endpoint).
+			if (TryNatTraversal()) {
+				if (GetDownloadState() == DS_CONNECTING) {
+					SetDownloadState(DS_WAITCALLBACK);
+				}
+				return true;
+			}
+#endif
 			//We cannot do a callback!
 			if (GetDownloadState() == DS_CONNECTING) {
 				SetDownloadState(DS_LOWTOLOWIP);

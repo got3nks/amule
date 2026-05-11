@@ -591,6 +591,24 @@ public:
 	// source-exchange packets where bit 7 means "hash follows", not NAT-T.
 	// Pass natTraversal=true only from Hello / DirectCallbackReq paths.
 	void		SetConnectOptions(uint8_t options, bool encryption = true, bool callback = true, bool natTraversal = false); // shortcut, sets crypt, callback, etc from the tagvalue we receive
+
+	bool		IsNatTraversalInFlight() const { return m_fNatTraversalInFlight != 0; }
+
+	// Phase E1: attempt a NAT-T rendezvous to reach this LowID peer.
+	// Called from TryToConnect when both we and the peer are LowID
+	// (the "no callback possible" gap). Returns true if the attempt
+	// was launched (the caller should defer DS_LOWTOLOWIP); false if
+	// any eligibility check failed (the caller falls through to the
+	// existing TCP-callback / LowID fallback).
+	bool		TryNatTraversal();
+
+	// Phase E1: completion notification from the rendezvous
+	// coordinator. ok=true means the rendezvous succeeded and `layer`
+	// is the connected uTP layer (caller hands off ownership). ok=false
+	// means timeout or routing failure; `layer` is NULL. In E1 the
+	// success path is stubbed-with-log — E2/E3 install the layer as
+	// the client's transport socket.
+	void		OnNatTraversalComplete(bool ok, class CUtpLayer* layer);
 	bool		ShouldReceiveCryptUDPPackets() const;
 
 	bool		HasDisabledSharedFiles() const { return m_fNoViewSharedFiles; }
@@ -787,7 +805,11 @@ private:
 		m_fSupportsSourceEx2 : 1,
 		m_fSupportsCaptcha   : 1,
 		m_fDirectUDPCallback : 1,
-		m_fSupportsNatTraversal : 1;
+		m_fSupportsNatTraversal : 1,
+		// Phase E1: marks an in-flight NAT-T rendezvous so the
+		// TryToConnect path doesn't re-fire while the coordinator
+		// is still working. Cleared by OnNatTraversalComplete.
+		m_fNatTraversalInFlight : 1;
 
 	unsigned int
 		m_fOsInfoSupport : 1,
