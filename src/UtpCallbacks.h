@@ -88,6 +88,19 @@ bool InstallOnContext(utp_context* ctx);
 // a NULL userdata is fine if the function doesn't dereference it.
 void SetSendtoDelegate(SendtoFn fn, void* userdata);
 
+// Forward a raw UDP packet through the registered sendto delegate.
+// Used by Phase B6's CUtpLayer::Connect to push the Key Frame
+// envelope through the same UDP transport libutp uses for its
+// sub-byte-0x00 frames — keeping a single egress point through
+// CClientUDPSocket regardless of frame type.
+//
+// Returns true if the delegate is installed and was invoked. False
+// indicates no transport hookup exists (pre-startup, or tests that
+// deliberately didn't install one) — callers must treat this as a
+// transient send failure, not a permanent error.
+bool SendRaw(const std::uint8_t* buf, std::size_t len,
+             const struct sockaddr* addr, socklen_t addr_len);
+
 } // namespace UtpCallbacks
 
 #endif // ENABLE_NAT_T

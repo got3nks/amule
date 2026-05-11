@@ -268,6 +268,7 @@ add_executable (UtpEnvironmentTest
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
 )
 
 add_test (NAME UtpEnvironmentTest
@@ -301,6 +302,7 @@ add_executable (UtpCallbacksTest
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
 )
 
 add_test (NAME UtpCallbacksTest
@@ -336,6 +338,7 @@ add_executable (UtpLayerTest
 	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
 )
 
 add_test (NAME UtpLayerTest
@@ -408,3 +411,39 @@ target_include_directories (UtpEncryptionTest
 target_link_libraries (UtpEncryptionTest
 	muleunit
 )
+
+# Phase B6 of the NAT-T port: CUtpLayer state-machine connect flow.
+# Pulls UtpLayer + UtpCallbacks + UtpEncryption + UtpKeyFrame +
+# UtpEnvironment so the layer's Connect path can encrypt the Key
+# Frame, send it via the test sendto delegate, and drive
+# utp_connect — all in a single test process without touching real
+# UDP. Production thunks (UtpEncryptionProduction.cpp) deliberately
+# stay out of the test link.
+add_executable (UtpConnectFlowTest
+	UtpConnectFlowTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpKeyFrame.cpp
+)
+
+add_test (NAME UtpConnectFlowTest
+	COMMAND UtpConnectFlowTest
+)
+
+target_include_directories (UtpConnectFlowTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpConnectFlowTest
+	muleunit
+)
+
+if (ENABLE_NAT_T)
+	target_link_libraries (UtpConnectFlowTest
+		utp
+	)
+endif()

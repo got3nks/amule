@@ -22,6 +22,8 @@
 
 #ifdef ENABLE_NAT_T
 
+#include "UtpCallbacks.h"
+#include "UtpEncryption.h"
 #include "UtpEnvironment.h"
 
 #include <utp.h>
@@ -31,25 +33,24 @@
 #include <mutex>
 
 // Out-of-class definitions for the constexpr static members.
-// Required pre-C++17 when these are ODR-used (e.g. taking their
-// address or binding to a reference, which our test fixture does
-// implicitly through ASSERT_EQUALS). C++17 makes static constexpr
-// members implicitly inline; defining them here costs nothing and
-// stays portable to the older standards the project supports.
-constexpr std::size_t CUtpLayer::kWriteBufferCapacity;
-constexpr std::size_t CUtpLayer::kReadBufferCapacity;
+// Required pre-C++17 when these are ODR-used (e.g. binding to a
+// reference through ASSERT_EQUALS). C++17 makes static constexpr
+// members implicitly inline; defining them here stays portable.
+constexpr std::size_t   CUtpLayer::kWriteBufferCapacity;
+constexpr std::size_t   CUtpLayer::kReadBufferCapacity;
+constexpr std::size_t   CUtpLayer::kUserHashSize;
+constexpr std::uint64_t CUtpLayer::kKeyFrameTimeoutMs;
 
 CUtpLayer::CUtpLayer(utp_context* ctx)
 	: m_ctx(ctx)
 	, m_socket(NULL)
-	, m_connected(false)
+	, m_state(State::INIT)
 	, m_writable(false)
-	, m_closed(false)
+	, m_peer_addr_len(0)
 {
-	// Pre-reserve capacity to avoid reallocations during steady-state
-	// traffic. erase-from-front in the drain path still costs O(n),
-	// but the practical n is bounded by 16 KiB so memmoves of that
-	// size at packet rate are noise next to libutp's own work.
+	std::memset(m_our_hash,  0, sizeof(m_our_hash));
+	std::memset(m_peer_hash, 0, sizeof(m_peer_hash));
+	// Pre-reserve to avoid reallocations during steady-state traffic.
 	m_writeBuf.reserve(kWriteBufferCapacity);
 	m_readBuf.reserve(kReadBufferCapacity);
 }
@@ -57,70 +58,129 @@ CUtpLayer::CUtpLayer(utp_context* ctx)
 CUtpLayer::~CUtpLayer()
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
-
-	if (m_socket != NULL) {
-		// Detach userdata before close so any callback libutp might
-		// fire during the close (state change to DESTROYING etc.) can
-		// no longer dereference this layer — matches eMuleAI's
-		// UtpSocket.cpp:1490 pattern.
-		utp_set_userdata(m_socket, NULL);
-		utp_close(m_socket);
-		m_socket = NULL;
-	}
+	TeardownSocketLocked();
 }
 
-bool CUtpLayer::Connect(const struct sockaddr* to, socklen_t to_len)
+bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
+                        const std::uint8_t peer_hash[kUserHashSize],
+                        const struct sockaddr* peer_addr,
+                        socklen_t addr_len)
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
-	if (m_ctx == NULL || m_socket != NULL || m_closed ||
-	    to == NULL || to_len == 0) {
+	if (m_state != State::INIT ||
+	    our_hash == NULL || peer_hash == NULL ||
+	    peer_addr == NULL || addr_len == 0) {
 		return false;
+	}
+
+	// Build the encrypted Key Frame envelope keyed on the peer's
+	// user hash. WrapKeyFrame returns false if no encrypt delegate
+	// is installed — that's a hard "encryption mandatory" guarantee,
+	// so propagate the failure without changing state.
+	std::vector<std::uint8_t> key_frame;
+	if (!UtpEncryption::WrapKeyFrame(our_hash, peer_hash, key_frame)) {
+		return false;
+	}
+
+	// Push the envelope onto the wire via the same UDP transport
+	// libutp uses for its sub-byte-0x00 frames. False here means no
+	// sendto delegate is installed yet — failed precondition.
+	if (!UtpCallbacks::SendRaw(key_frame.data(), key_frame.size(),
+	                           peer_addr, addr_len)) {
+		return false;
+	}
+
+	// Record hashes + address for use in OnPeerKeyFrame, then enter
+	// KEY_FRAME_SENT. The transition is intentionally last so any
+	// failure above leaves the layer in INIT and the caller can
+	// retry / fall back to TCP without an inconsistent state.
+	std::memcpy(m_our_hash,  our_hash,  kUserHashSize);
+	std::memcpy(m_peer_hash, peer_hash, kUserHashSize);
+	m_peer_addr.assign(reinterpret_cast<const std::uint8_t*>(peer_addr),
+	                   reinterpret_cast<const std::uint8_t*>(peer_addr) + addr_len);
+	m_peer_addr_len = addr_len;
+	m_state         = State::KEY_FRAME_SENT;
+
+	return true;
+}
+
+bool CUtpLayer::OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize])
+{
+	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+
+	if (m_state != State::KEY_FRAME_SENT || sender_hash == NULL) {
+		return false;
+	}
+
+	// Validate the embedded hash matches the peer we recorded on
+	// Connect. A mismatch usually means the inbound dispatch routed
+	// the Key Frame to the wrong layer (multiple connects in flight)
+	// — leave us in KEY_FRAME_SENT so the correct dispatch can still
+	// occur if/when the right Key Frame arrives.
+	if (std::memcmp(sender_hash, m_peer_hash, kUserHashSize) != 0) {
+		return false;
+	}
+
+	// Bring up the libutp side: create the socket, register `this`
+	// so the static callbacks can dispatch into us, then utp_connect
+	// fires the SYN through on_sendto.
+	if (m_ctx == NULL) {
+		m_state = State::FAILED;
+		return true;
 	}
 
 	m_socket = utp_create_socket(m_ctx);
 	if (m_socket == NULL) {
-		return false;
+		m_state = State::FAILED;
+		return true;
 	}
 	utp_set_userdata(m_socket, this);
 
-	int rc = utp_connect(m_socket, to, to_len);
+	const struct sockaddr* peer = reinterpret_cast<const struct sockaddr*>(
+		m_peer_addr.data());
+	int rc = utp_connect(m_socket, peer, m_peer_addr_len);
 	if (rc != 0) {
-		// Roll back: utp_connect rejected the address. libutp's
-		// socket allocation is undone via utp_close; userdata is
-		// cleared so we won't get back-callbacks against a layer
-		// that never made it onto the wire.
-		utp_set_userdata(m_socket, NULL);
-		utp_close(m_socket);
-		m_socket = NULL;
-		return false;
+		// Roll back the socket allocation; never publish a broken layer.
+		TeardownSocketLocked();
+		m_state = State::FAILED;
+		return true;
 	}
 
+	m_state = State::UTP_CONNECTING;
 	return true;
+}
+
+bool CUtpLayer::CheckTimeout(std::uint64_t elapsed_ms)
+{
+	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+
+	if (m_state == State::KEY_FRAME_SENT && elapsed_ms >= kKeyFrameTimeoutMs) {
+		m_state    = State::FAILED;
+		m_writable = false;
+		return true;
+	}
+	return false;
 }
 
 std::int64_t CUtpLayer::Send(const void* buf, std::size_t count)
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
-	if (m_closed || buf == NULL || count == 0) {
+	if (m_state == State::CLOSED || m_state == State::FAILED ||
+	    buf == NULL || count == 0) {
 		return 0;
 	}
 
 	const std::size_t available = kWriteBufferCapacity - m_writeBuf.size();
 	const std::size_t to_buffer = std::min(count, available);
 	if (to_buffer == 0) {
-		// Buffer full. Caller must wait for OnStateChange(WRITABLE)
-		// to drain capacity before retrying.
 		return 0;
 	}
 
 	const std::uint8_t* p = static_cast<const std::uint8_t*>(buf);
 	m_writeBuf.insert(m_writeBuf.end(), p, p + to_buffer);
 
-	// Opportunistic drain — if libutp's CWND has room right now,
-	// push some bytes immediately rather than waiting for the next
-	// WRITABLE callback. The plan-Q5 "internal write buffer" pattern.
 	if (m_writable && m_socket != NULL) {
 		DrainWriteBufferLocked();
 	}
@@ -147,29 +207,30 @@ void CUtpLayer::Close()
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
-	if (m_closed) {
+	if (m_state == State::CLOSED) {
 		return;
 	}
-	m_closed = true;
+	m_state    = State::CLOSED;
 	m_writable = false;
+	TeardownSocketLocked();
+}
 
-	if (m_socket != NULL) {
-		utp_set_userdata(m_socket, NULL);
-		utp_close(m_socket);
-		m_socket = NULL;
-	}
+CUtpLayer::State CUtpLayer::GetState() const
+{
+	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+	return m_state;
 }
 
 bool CUtpLayer::IsClosed() const
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
-	return m_closed;
+	return m_state == State::CLOSED || m_state == State::FAILED;
 }
 
 bool CUtpLayer::IsConnected() const
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
-	return m_connected;
+	return m_state == State::CONNECTED;
 }
 
 bool CUtpLayer::IsWritable() const
@@ -198,31 +259,35 @@ void CUtpLayer::OnStateChange(int new_state)
 	switch (new_state) {
 		case UTP_STATE_CONNECT:
 		case UTP_STATE_WRITABLE:
-			m_connected = true;
-			m_writable  = true;
+			// First CONNECT/WRITABLE completes the handshake; further
+			// WRITABLE events just keep refilling the CWND.
+			if (m_state == State::UTP_CONNECTING ||
+			    m_state == State::KEY_FRAME_SENT ||
+			    m_state == State::INIT) {
+				m_state = State::CONNECTED;
+			}
+			m_writable = true;
 			DrainWriteBufferLocked();
 			break;
 
 		case UTP_STATE_EOF:
-			// Remote side cleanly closed. We're not writable any more
-			// but the app may still drain residual bytes from the read
-			// buffer; only set closed once the read buffer is empty
-			// and the caller acknowledges via its own Recv loop. For
-			// now, stop accepting writes — Recv continues to work.
+			// Remote side cleanly closed. Stop accepting writes but
+			// keep Recv functional until the app drains residual
+			// bytes from the read buffer.
 			m_writable = false;
 			break;
 
 		case UTP_STATE_DESTROYING:
-			// libutp is freeing the socket. Drop our reference. The
-			// layer object itself stays alive (owned by the caller);
-			// it just becomes a buffer-only zombie until destroyed.
+			// libutp is freeing the socket. Drop our reference and
+			// mark the layer permanently dead. The CUtpLayer object
+			// itself stays alive (owned by the caller); it just
+			// becomes a buffer-only zombie until destroyed.
 			m_socket   = NULL;
 			m_writable = false;
-			m_closed   = true;
+			m_state    = State::CLOSED;
 			break;
 
 		default:
-			// Unknown state — defensively ignore.
 			break;
 	}
 }
@@ -240,9 +305,6 @@ void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 		m_readBuf.insert(m_readBuf.end(), data, data + to_copy);
 	}
 
-	// Tell libutp we consumed the delivery. If we couldn't take all
-	// of it (buffer was full), the next OnGetReadBufferSize will
-	// return 0 and libutp will apply backpressure on the sender.
 	if (m_socket != NULL) {
 		utp_read_drained(m_socket);
 	}
@@ -251,7 +313,7 @@ void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 void CUtpLayer::OnError(int /*error_code*/)
 {
 	// Lock NOT acquired here — caller (libutp via UtpCallbacks) holds it.
-	m_closed   = true;
+	m_state    = State::FAILED;
 	m_writable = false;
 }
 
@@ -263,20 +325,32 @@ std::size_t CUtpLayer::OnGetReadBufferSize() const
 
 void CUtpLayer::DrainWriteBufferLocked()
 {
-	// Caller (any path that reaches this) must hold RuntimeLock.
-	while (!m_writeBuf.empty() && m_socket != NULL && m_writable && !m_closed) {
+	while (!m_writeBuf.empty() && m_socket != NULL && m_writable &&
+	       m_state != State::CLOSED && m_state != State::FAILED) {
 		const ssize_t wrote = utp_write(m_socket,
 		                                m_writeBuf.data(),
 		                                m_writeBuf.size());
 		if (wrote <= 0) {
-			// libutp's CWND is full or it refused for some other
-			// reason. Mark non-writable; the next UTP_STATE_WRITABLE
-			// callback will retry the drain. Bytes stay buffered.
+			// libutp's CWND is full or it refused. Mark non-writable;
+			// the next UTP_STATE_WRITABLE callback retries the drain.
 			m_writable = false;
 			return;
 		}
 		m_writeBuf.erase(m_writeBuf.begin(),
 		                 m_writeBuf.begin() + static_cast<std::ptrdiff_t>(wrote));
+	}
+}
+
+void CUtpLayer::TeardownSocketLocked()
+{
+	if (m_socket != NULL) {
+		// Detach userdata before close so any callback libutp might
+		// fire during the close (state change to DESTROYING etc.)
+		// can no longer dereference this layer — matches eMuleAI's
+		// UtpSocket.cpp:1490 pattern.
+		utp_set_userdata(m_socket, NULL);
+		utp_close(m_socket);
+		m_socket = NULL;
 	}
 }
 

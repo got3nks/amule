@@ -25,38 +25,42 @@
 
 #ifdef ENABLE_NAT_T
 
-// Phase B3 of the NAT-T port (see .archive/eMuleAI-nat-t-implementation-plan.md
-// cluster 6, sub-commit B3). One CUtpLayer wraps one libutp connection
-// (the utp_socket) plus the application-side write buffer and read
-// buffer that adapt libutp's async windowing model to the synchronous
-// "Send buf / Recv buf" API CUpDownClient expects.
+// Phase B3 / B6 of the NAT-T port (see .archive/eMuleAI-nat-t-implementation-plan.md
+// cluster 6, sub-commits B3 + B6). One CUtpLayer wraps one libutp
+// connection plus the application-side write buffer (16 KiB) and
+// read buffer (64 KiB) that adapt libutp's async windowing model to
+// the synchronous "Send buf / Recv buf" API CUpDownClient expects.
 //
-// Lifecycle (outbound case, the only one supported in Phase B):
+// Lifecycle / state machine (outbound case, the only one supported
+// in Phase B):
 //
-//   layer = new CUtpLayer(ctx);           // no socket yet
-//   layer->Connect(&peer_addr, sizeof);   // creates socket, utp_connect
-//   layer->Send(payload, n);              // buffer + opportunistic flush
-//   ... time passes; libutp drives the handshake ...
-//   layer->OnStateChange(UTP_STATE_CONNECT);   // via callback
-//   layer->OnStateChange(UTP_STATE_WRITABLE);  // drains buffered data
-//   layer->OnRead(data, len);             // via callback, buffers inbound
-//   layer->Recv(outbuf, n);               // app reads from read buffer
-//   layer->Close();                       // utp_close (FIN)
-//   delete layer;                         // dtor cleans up
+//   layer = new CUtpLayer(ctx);                         // state = INIT
+//   layer->Connect(our_hash, peer_hash, peer_addr, ..); // → KEY_FRAME_SENT
+//                                                       // (Key Frame sent)
+//   ... peer's Key Frame arrives over the wire ...
+//   layer->OnPeerKeyFrame(sender_hash);                 // → UTP_CONNECTING
+//                                                       // (utp_connect fired,
+//                                                       //  libutp SYN out)
+//   layer->OnStateChange(UTP_STATE_CONNECT);            // → CONNECTED
+//   layer->Send(payload, n);                            // app-level writes
+//   layer->OnRead(data, len);                           // app-level reads
+//   layer->Recv(outbuf, n);
+//   layer->Close();                                     // → CLOSED
+//   delete layer;
 //
-// Threading: public methods (Send/Recv/Close/Connect/IsXxx) acquire
-// UtpEnvironment::RuntimeLock. Callback-side methods (OnStateChange /
-// OnRead / OnError / OnGetReadBufferSize) assume the lock is already
-// held — they are invoked by the static UtpCallbacks functions which
-// run while libutp's caller (utp_process_udp / utp_check_timeouts /
-// etc.) is inside UtpEnvironment::RuntimeLock. Callback methods must
-// NOT re-acquire the lock (std::mutex is non-recursive).
+//   Off-the-happy-path:
+//   - Timeout (no peer Key Frame in kKeyFrameTimeoutMs):    → FAILED
+//   - libutp error (UTP_ECONNREFUSED / RESET / TIMEDOUT):   → FAILED
+//   - libutp UTP_STATE_DESTROYING:                          → CLOSED
 //
-// CUtpLayer is intentionally testable without a real connection:
-// the buffer logic works whether or not Connect() has been called.
-// Tests construct a layer, exercise Send/Recv/OnRead/OnStateChange,
-// and never touch the wire — the per-buffer invariants are all that
-// matter at this phase.
+// Threading: public methods (Connect / OnPeerKeyFrame / Send / Recv /
+// Close / CheckTimeout / IsXxx accessors / GetState) acquire
+// UtpEnvironment::RuntimeLock. libutp-callback dispatch methods
+// (OnStateChange / OnRead / OnError / OnGetReadBufferSize) assume
+// the lock is already held — they are invoked by the static
+// UtpCallbacks functions which run while libutp's caller is inside
+// UtpEnvironment::RuntimeLock. Callback methods must NOT re-acquire
+// the lock (std::mutex is non-recursive).
 
 #include <cstddef>
 #include <cstdint>
@@ -73,6 +77,18 @@ typedef struct UTPSocket utp_socket;
 class CUtpLayer
 {
 public:
+	// Per-connection state machine. See the file-header comment for
+	// the transition diagram.
+	enum class State : int {
+		INIT             = 0,  // before Connect()
+		KEY_FRAME_SENT   = 1,  // our Key Frame sent; waiting for peer's
+		UTP_CONNECTING   = 2,  // peer Key Frame received; utp_connect
+		                       // fired; waiting for UTP_STATE_CONNECT
+		CONNECTED        = 3,  // UTP_STATE_CONNECT or WRITABLE seen
+		FAILED           = 4,  // timeout or libutp error
+		CLOSED           = 5,  // Close() or UTP_STATE_DESTROYING
+	};
+
 	// Maximum outbound bytes buffered between Send() and libutp's
 	// CWND-allowed drain. eMuleAI uses 16 KiB; we match (plan Q5).
 	static constexpr std::size_t kWriteBufferCapacity = 16 * 1024;
@@ -83,17 +99,20 @@ public:
 	// headroom for a few packets of jitter buffer.
 	static constexpr std::size_t kReadBufferCapacity = 64 * 1024;
 
-	// Constructor takes the utp_context the layer's eventual socket
-	// will live under. The context is borrowed, not owned: it must
-	// outlive the layer. Pass UtpEnvironment::GetContext() in
-	// production; tests pass their own test-local context.
-	//
-	// No utp_socket is created here — Connect() does that. This
-	// makes the constructor side-effect-free, which keeps tests of
-	// the buffer logic simple (construct + Send/OnRead without
-	// involving the wire).
-	explicit CUtpLayer(utp_context* ctx);
+	// User hash size (CMD4Hash) — duplicated locally so this header
+	// doesn't pull in CMD4Hash.h. Must match
+	// UtpEncryption::kUserHashSize and UtpKeyFrame::kUserHashSize.
+	static constexpr std::size_t kUserHashSize = 16;
 
+	// Time the layer is allowed to spend in KEY_FRAME_SENT before
+	// CheckTimeout transitions to FAILED. 12 s matches the plan's
+	// RENDEZVOUSFALLBACKDELAY (Cluster 9, Phase E2) — the policy is
+	// "if the peer Key Frame doesn't arrive in 12 seconds, give up
+	// and fall back to TCP". The matching wxTimer that drives
+	// CheckTimeout periodically lives in Phase B7.
+	static constexpr std::uint64_t kKeyFrameTimeoutMs = 12000;
+
+	explicit CUtpLayer(utp_context* ctx);
 	~CUtpLayer();
 
 	// Disable copy/move — the utp_socket userdata pointer holds a
@@ -104,96 +123,108 @@ public:
 	CUtpLayer(CUtpLayer&&) = delete;
 	CUtpLayer& operator=(CUtpLayer&&) = delete;
 
-	// Initiate the libutp connect handshake.
+	// Initiate the NAT-T handshake:
+	//   1. Build and send a Key Frame to peer (via
+	//      UtpEncryption::WrapKeyFrame using peer_hash as the key,
+	//      then UtpCallbacks' SendRaw helper).
+	//   2. Record our_hash, peer_hash, peer_addr for later steps.
+	//   3. Transition INIT → KEY_FRAME_SENT.
 	//
-	// Returns true if utp_create_socket succeeded and utp_connect was
-	// accepted. The connection is *not* yet established when this
-	// returns — completion is signalled by OnStateChange(UTP_STATE_CONNECT)
-	// firing later via the libutp callback path. Pre-CONNECT bytes
-	// passed to Send() sit in the write buffer and are released to
-	// libutp once the WRITABLE state arrives.
+	// Returns false on prerequisite failures:
+	//   - Layer already past INIT.
+	//   - NULL pointers, zero-length address.
+	//   - WrapKeyFrame fails (no encrypt delegate, etc.).
+	//   - SendRaw fails (no sendto delegate, etc.).
+	bool Connect(const std::uint8_t our_hash[kUserHashSize],
+	             const std::uint8_t peer_hash[kUserHashSize],
+	             const struct sockaddr* peer_addr, socklen_t addr_len);
+
+	// Called by the inbound-dispatch path (CClientUDPSocket) when a
+	// sub-byte-0xFF Key Frame arrives whose sender_hash matches
+	// (one of) the layers waiting in KEY_FRAME_SENT. The current
+	// Phase B6 wiring only verifies the embedded sender_hash equals
+	// the peer_hash we recorded in Connect; layer-routing (which
+	// layer's OnPeerKeyFrame to call, when multiple layers exist)
+	// is solved upstream — this method just refuses to advance on a
+	// hash mismatch.
 	//
-	// Returns false on programming-error paths: layer already closed,
-	// already connected, NULL context, libutp allocation failure, or
-	// utp_connect rejecting the address.
-	bool Connect(const struct sockaddr* to, socklen_t to_len);
+	// On match: creates a utp_socket via utp_create_socket, attaches
+	// `this` as utp_set_userdata, calls utp_connect against the
+	// recorded peer_addr, transitions KEY_FRAME_SENT → UTP_CONNECTING.
+	//
+	// Returns true iff a state transition occurred.
+	bool OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize]);
+
+	// Manual time-based timeout driver. `elapsed_ms` is the time
+	// since Connect() was called, in milliseconds — Phase B6 leaves
+	// the clock injection up to the caller so tests can advance time
+	// deterministically. Phase B7's wxTimer will record the Connect
+	// timestamp and call this with `now - start` every 50 ms.
+	//
+	// Effect: if state is KEY_FRAME_SENT and elapsed_ms >=
+	// kKeyFrameTimeoutMs, transition to FAILED.
+	//
+	// Returns true iff a state transition occurred.
+	bool CheckTimeout(std::uint64_t elapsed_ms);
 
 	// Buffer up to count bytes for outbound transmission. Returns
 	// the number of bytes accepted into the buffer (0..count).
-	//
-	// If the buffer is full at call time, returns 0 (the caller must
-	// retry later — typically after waiting for an EVT_WRITABLE-style
-	// signal which libutp gives us via OnStateChange). This is the
-	// "short-write" semantics the plan calls out (Q5).
-	//
-	// Bytes are flushed to libutp opportunistically: immediately
-	// (this call) when the layer is in a writable state, otherwise
-	// on the next OnStateChange(UTP_STATE_WRITABLE).
 	std::int64_t Send(const void* buf, std::size_t count);
 
 	// Copy up to count bytes from the read buffer into buf, returning
-	// the number copied (0..count). Returns 0 if no data is
-	// available; non-blocking. The buffer is drained FIFO.
+	// the number copied. Non-blocking; FIFO drain.
 	std::int64_t Recv(void* buf, std::size_t count);
 
-	// Mark the layer closed and request libutp to FIN the connection.
-	// Subsequent Send/Recv return 0. The libutp socket may still be
-	// alive briefly while the FIN propagates; final destruction is
-	// signalled by OnStateChange(UTP_STATE_DESTROYING).
+	// Mark the layer closed (state → CLOSED) and request libutp to
+	// FIN the connection. Idempotent.
 	void Close();
 
-	// Inspection / test-helper accessors. All take the runtime lock.
-	bool IsClosed() const;
-	bool IsConnected() const;     // ever transitioned to CONNECT/WRITABLE
-	bool IsWritable() const;      // currently writable
+	// State inspection / test-helper accessors. All take the runtime
+	// lock.
+	State       GetState() const;
+	bool        IsClosed()   const;  // CLOSED or FAILED
+	bool        IsConnected() const; // CONNECTED
+	bool        IsWritable()  const;
 	std::size_t WriteBufferSize() const;
-	std::size_t ReadBufferSize() const;
+	std::size_t ReadBufferSize()  const;
 
 	// --- libutp callback dispatch -----------------------------------
 	//
-	// These four methods are invoked by the static callbacks in
-	// UtpCallbacks.cpp via utp_get_userdata(socket). They run on the
-	// thread that's already inside a libutp API call, with
-	// UtpEnvironment::RuntimeLock already held. They must NOT
-	// re-acquire the lock.
+	// Invoked by the static UtpCallbacks functions via
+	// utp_get_userdata(socket). Run with RuntimeLock already held;
+	// must NOT re-acquire it.
 
-	// Reacts to UTP_STATE_CONNECT / WRITABLE / EOF / DESTROYING.
-	// CONNECT and WRITABLE set the writable flag and drain the
-	// outbound buffer. DESTROYING is libutp's "the socket is being
-	// freed" signal — the layer detaches its socket pointer.
 	void OnStateChange(int new_state);
-
-	// Receives len bytes from libutp. The data is copied into the
-	// read buffer (up to kReadBufferCapacity) and utp_read_drained
-	// is called so libutp's flow control progresses. If the read
-	// buffer is already full, libutp will be told (via the next
-	// OnGetReadBufferSize call) that we have no room — that is the
-	// path that applies backpressure.
 	void OnRead(const std::uint8_t* data, std::size_t len);
-
-	// Connection-level error: refused / reset / timed-out. The layer
-	// marks itself closed; the app will discover via IsClosed().
 	void OnError(int error_code);
-
-	// libutp asks how much room remains in the read buffer.
-	// Returning 0 here causes libutp to apply backpressure.
 	std::size_t OnGetReadBufferSize() const;
 
 private:
-	// Attempt to push the head of the write buffer through utp_write.
-	// Called with the runtime lock already held. Stops when libutp's
-	// CWND fills up (returns short or zero); the leftover bytes stay
-	// in the buffer until the next WRITABLE callback.
+	// Drain the write buffer through utp_write while libutp has CWND
+	// room. Caller holds RuntimeLock.
 	void DrainWriteBufferLocked();
 
-	utp_context* m_ctx;           // borrowed, not owned
-	utp_socket*  m_socket;        // owned by libutp; we hold a ref
+	// Detach and close the libutp socket (utp_set_userdata to NULL,
+	// utp_close). Caller holds RuntimeLock. Idempotent.
+	void TeardownSocketLocked();
+
+	utp_context* m_ctx;            // borrowed, not owned
+	utp_socket*  m_socket;         // owned by libutp; we hold a ref
+
+	State m_state;
+	bool  m_writable;              // libutp CWND has room; orthogonal to State
+
+	// Hashes + address recorded by Connect for later validation /
+	// libutp dispatch in OnPeerKeyFrame. Sized to kUserHashSize each;
+	// the address is stored in a sockaddr_storage-sized buffer so
+	// either V4 or V6 can be saved (in practice Phase B is V4-only).
+	std::uint8_t  m_our_hash[kUserHashSize];
+	std::uint8_t  m_peer_hash[kUserHashSize];
+	std::vector<std::uint8_t> m_peer_addr;  // raw sockaddr bytes
+	socklen_t                 m_peer_addr_len;
+
 	std::vector<std::uint8_t> m_writeBuf;
 	std::vector<std::uint8_t> m_readBuf;
-	bool m_connected;             // true after first CONNECT/WRITABLE
-	bool m_writable;              // currently writable (CWND has room)
-	bool m_closed;                // Close() called, EOF received, or
-	                              // OnError fired, or socket destroyed
 };
 
 #endif // ENABLE_NAT_T

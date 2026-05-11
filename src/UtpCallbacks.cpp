@@ -188,6 +188,20 @@ void SetSendtoDelegate(SendtoFn fn, void* userdata)
 	g_sendto_userdata = userdata;
 }
 
+bool SendRaw(const std::uint8_t* buf, std::size_t len,
+             const struct sockaddr* addr, socklen_t addr_len)
+{
+	SendtoFn fn       = g_sendto_fn;
+	void*    userdata = g_sendto_userdata;
+	if (fn == NULL || buf == NULL || len == 0 ||
+	    addr == NULL || addr_len == 0) {
+		return false;
+	}
+
+	fn(userdata, buf, len, addr, addr_len);
+	return true;
+}
+
 } // namespace UtpCallbacks
 
 #endif // ENABLE_NAT_T

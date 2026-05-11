@@ -51,7 +51,9 @@
 #include <zlib.h>
 #include "EncryptedDatagramSocket.h"
 #ifdef ENABLE_NAT_T
+#include "UtpEncryption.h"
 #include "UtpEnvironment.h"
+#include "UtpKeyFrame.h"
 #endif
 
 //
@@ -75,6 +77,13 @@ CClientUDPSocket::CClientUDPSocket(const amuleIPV4Address& address, const CProxy
 		AddDebugLogLineN(logClientUDP,
 			wxT("NAT-T: utp_init failed; NAT-T disabled for this session"));
 	}
+
+	// Phase B6: wire the encryption thunks so any Key Frame / uTP
+	// frame WrapKeyFrame / UnwrapKeyFrame call routes through
+	// CEncryptedDatagramSocket. Idempotent — calling this twice (in
+	// the unlikely event of multiple CClientUDPSocket lifetimes per
+	// process) just re-overwrites the delegate pointers.
+	UtpEncryption::InstallProductionDelegates();
 #endif
 }
 
@@ -131,24 +140,48 @@ void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer,
 #ifdef ENABLE_NAT_T
 				case OP_UDPRESERVEDPROT2:
 					// NAT-T / uTP envelope: OP_UDPRESERVEDPROT2 (0xB2)
-					// carries either a uTP frame (sub-byte 0x00) or a
-					// Key Frame (sub-byte 0xFF) used to bootstrap
-					// encryption keying before the first uTP SYN.
-					// Phase B0 stub: the dispatch is wired here so that
-					// later phases (B1+) can drop in the handlers
-					// without re-modifying the switch. For now we drop
-					// silently with a debug log; vanilla aMule peers
-					// that don't define ENABLE_NAT_T fall through to
-					// the default "Unknown opcode" branch, which is
-					// the correct interop behavior (vanilla drops the
-					// packet, no harm done).
+					// carries either a Key Frame (sub-byte 0xFF) or a
+					// uTP frame (sub-byte 0x00). Vanilla aMule peers
+					// without ENABLE_NAT_T fall through to the
+					// default "Unknown opcode" branch and drop the
+					// packet — correct interop behavior.
+					//
+					// Phase B6 wiring:
+					//   sub-byte 0xFF: UnwrapKeyFrame to recover the
+					//     sender's user hash, then log + drop. The
+					//     "route to the matching CUtpLayer" step
+					//     lands in a later sub-commit once the layer
+					//     registry exists. The unwrap is done now so
+					//     a malformed frame is rejected at the
+					//     earliest layer.
+					//   sub-byte 0x00: log + drop. The uTP-frame path
+					//     (decrypt → utp_process_udp) lands together
+					//     with the layer registry.
 					if (packetLen >= 2) {
 						uint8_t natSubByte = decryptedBuffer[1];
-						AddDebugLogLineN(logClientUDP, CFormat(
-							"NAT-T: received OP_UDPRESERVEDPROT2 from %s, "
-							"sub=0x%02x len=%d (handler stub — Phase B0)")
-							% Uint32_16toStringIP_Port(ip, port)
-							% (unsigned)natSubByte % packetLen);
+						if (natSubByte == UtpKeyFrame::kSubByte) {
+							uint8_t sender_hash[UtpKeyFrame::kUserHashSize];
+							if (UtpEncryption::UnwrapKeyFrame(
+									decryptedBuffer,
+									static_cast<std::size_t>(packetLen),
+									ip,
+									sender_hash)) {
+								AddDebugLogLineN(logClientUDP, CFormat(
+									"NAT-T: received Key Frame from %s")
+									% Uint32_16toStringIP_Port(ip, port));
+							} else {
+								AddDebugLogLineN(logClientUDP, CFormat(
+									"NAT-T: malformed Key Frame from %s "
+									"(rejected by UnwrapKeyFrame)")
+									% Uint32_16toStringIP_Port(ip, port));
+							}
+						} else {
+							AddDebugLogLineN(logClientUDP, CFormat(
+								"NAT-T: received OP_UDPRESERVEDPROT2 from %s, "
+								"sub=0x%02x len=%d (handler not wired yet)")
+								% Uint32_16toStringIP_Port(ip, port)
+								% (unsigned)natSubByte % packetLen);
+						}
 					}
 					break;
 #endif // ENABLE_NAT_T
