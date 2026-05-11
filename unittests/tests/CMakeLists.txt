@@ -255,3 +255,35 @@ target_include_directories (NetworkInfoTest
 target_link_libraries (NetworkInfoTest
 	muleunit
 )
+
+# Phase B1 of the NAT-T port: the global libutp context owner +
+# runtime lock. The test pulls in UtpEnvironment.cpp directly so it
+# doesn't depend on the rest of the amuled object set. When
+# ENABLE_NAT_T=OFF the test still compiles (UtpEnvironment.cpp's body
+# is a no-op #ifdef'd out, and the test registers a single
+# always-passes case) but it skips the libutp link — so we only link
+# `utp` into the test target when the feature is on.
+add_executable (UtpEnvironmentTest
+	UtpEnvironmentTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
+)
+
+add_test (NAME UtpEnvironmentTest
+	COMMAND UtpEnvironmentTest
+)
+
+target_include_directories (UtpEnvironmentTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpEnvironmentTest
+	muleunit
+)
+
+if (ENABLE_NAT_T)
+	target_link_libraries (UtpEnvironmentTest
+		utp
+	)
+endif()

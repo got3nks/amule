@@ -32,12 +32,13 @@ class CClientUDPSocket : public CMuleUDPSocket
 {
 public:
 	CClientUDPSocket(const amuleIPV4Address &address, const CProxyData *ProxyData = NULL);
+	~CClientUDPSocket() override;
 
 protected:
-	void	OnReceive(int errorCode);
+	void	OnReceive(int errorCode) override;
 
 private:
-	void	OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer, size_t length);
+	void	OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer, size_t length) override;
 	void	ProcessPacket(uint8_t* packet, int16 size, int8 opcode, uint32 host, uint16 port);
 };
 

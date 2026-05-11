@@ -50,6 +50,9 @@
 #include "kademlia/utils/KadUDPKey.h"
 #include <zlib.h>
 #include "EncryptedDatagramSocket.h"
+#ifdef ENABLE_NAT_T
+#include "UtpEnvironment.h"
+#endif
 
 //
 // CClientUDPSocket -- Extended eMule UDP socket
@@ -61,6 +64,28 @@ CClientUDPSocket::CClientUDPSocket(const amuleIPV4Address& address, const CProxy
 	if (!thePrefs::IsUDPDisabled()) {
 		Open();
 	}
+
+#ifdef ENABLE_NAT_T
+	// Phase B1: bring up the global libutp context. eMuleAI does the
+	// same here: there's exactly one utp_context per process, owned by
+	// the UDP socket because all NAT-T traffic flows over this single
+	// socket. utp_init returning NULL is non-fatal — NAT-T just stays
+	// dormant and HighID/LowID transfers continue over TCP as today.
+	if (UtpEnvironment::Init() == NULL) {
+		AddDebugLogLineN(logClientUDP,
+			wxT("NAT-T: utp_init failed; NAT-T disabled for this session"));
+	}
+#endif
+}
+
+
+CClientUDPSocket::~CClientUDPSocket()
+{
+#ifdef ENABLE_NAT_T
+	// Tear down the global libutp context. Safe to call even if Init()
+	// failed — Shutdown() is a no-op when there is no live context.
+	UtpEnvironment::Shutdown();
+#endif
 }
 
 

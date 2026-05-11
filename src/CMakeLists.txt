@@ -514,6 +514,21 @@ if (amule_HAVE_LIBCURL)
 	endforeach()
 endif()
 
+# Phase B1 of the NAT-T port: when ENABLE_NAT_T=YES, UtpEnvironment.cpp
+# (pulled into CORE_SOURCES) calls libutp's utp_init/utp_destroy, so the
+# vendored utp target (built by cmake/utp.cmake when ENABLE_NAT_T is on)
+# must be linked into every app that includes CORE_SOURCES. amulegui is
+# excluded because it doesn't pull CORE_SOURCES — it's a remote GUI for
+# the daemon. When ENABLE_NAT_T=OFF the utp target doesn't exist and the
+# guard short-circuits, leaving the default build untouched.
+if (ENABLE_NAT_T)
+	foreach (_tgt IN ITEMS amuled amule)
+		if (TARGET ${_tgt})
+			target_link_libraries (${_tgt} PRIVATE utp)
+		endif()
+	endforeach()
+endif()
+
 if (NEED_LIB_MULEAPPCOMMON)
 	add_library (muleappcommon STATIC
 		${UPNP_SOURCES}
