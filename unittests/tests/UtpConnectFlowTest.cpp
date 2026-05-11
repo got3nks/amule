@@ -34,6 +34,7 @@
 #include "UtpLayer.h"
 #include "UtpCallbacks.h"
 #include "UtpEncryption.h"
+#include "UtpLayerRegistry.h"
 
 #ifdef ENABLE_NAT_T
 
@@ -106,6 +107,7 @@ void reset_global_state()
 	UtpCallbacks::SetSendtoDelegate(NULL, NULL);
 	UtpEncryption::SetEncryptDelegate(NULL);
 	UtpEncryption::SetDecryptDelegate(NULL);
+	UtpLayerRegistry::ClearForTesting();
 }
 
 void install_test_delegates()
@@ -185,10 +187,15 @@ TEST(UtpConnectFlow, ConnectSendsKeyFrameAndTransitionsState)
 
 
 // OnPeerKeyFrame with the matching hash must call utp_connect, which
-// triggers libutp to emit a SYN through on_sendto → our capture
-// delegate gets a second packet whose first-byte high-nibble is
-// ST_SYN = 4. State transitions KEY_FRAME_SENT → UTP_CONNECTING.
-TEST(UtpConnectFlow, OnPeerKeyFrameTriggersUtpSyn)
+// triggers libutp to emit a SYN through on_sendto → CUtpLayer's
+// OnSendto wraps it via WrapUtpFrame and pushes the wrapped envelope
+// through the sendto delegate. State transitions KEY_FRAME_SENT →
+// UTP_CONNECTING.
+//
+// With identity_encrypt installed, the captured packet is
+// [0xB2, 0x00, raw_utp_syn...]. Byte 2 is the original libutp byte 0
+// — a SYN packet with version 1 = 0x41.
+TEST(UtpConnectFlow, OnPeerKeyFrameTriggersWrappedUtpSyn)
 {
 	reset_global_state();
 	install_test_delegates();
@@ -212,14 +219,57 @@ TEST(UtpConnectFlow, OnPeerKeyFrameTriggersUtpSyn)
 		ASSERT_TRUE(layer.OnPeerKeyFrame(peer_hash));
 		ASSERT_TRUE(layer.GetState() == CUtpLayer::State::UTP_CONNECTING);
 
-		// libutp emitted at least one packet — the SYN. The first
-		// byte's high nibble is ST_SYN (4), low nibble is wire-format
-		// version (1), so byte 0 == 0x41.
+		// libutp emitted at least one packet — the SYN, now wrapped
+		// in the OP_UDPRESERVEDPROT2 sub-byte-0x00 envelope.
 		ASSERT_TRUE(g_capture.packets.size() >= 2);
-		const CapturedPacket& syn = g_capture.packets[1];
-		ASSERT_TRUE(syn.payload.size() >= 1);
-		ASSERT_EQUALS((int)0x41, (int)syn.payload[0]);
+		const CapturedPacket& wrapped_syn = g_capture.packets[1];
+		// Preamble: [0xB2, 0x00].
+		ASSERT_TRUE(wrapped_syn.payload.size() >= 3);
+		ASSERT_EQUALS((int)0xB2, (int)wrapped_syn.payload[0]);
+		ASSERT_EQUALS((int)0x00, (int)wrapped_syn.payload[1]);
+		// Inside the envelope (identity_encrypt is a no-op transform):
+		// byte 0 of the raw uTP packet is ST_SYN | version = 0x41.
+		ASSERT_EQUALS((int)0x41, (int)wrapped_syn.payload[2]);
 	}
+
+	utp_destroy(ctx);
+	reset_global_state();
+}
+
+
+// Phase B7.5 F1+F2: Connect must register the layer in the global
+// registry; the layer's destructor must unregister it. Verifies the
+// registry-driven inbound dispatch path can find the layer by
+// peer_hash.
+TEST(UtpConnectFlow, ConnectAndDestroyMaintainRegistry)
+{
+	reset_global_state();
+	install_test_delegates();
+
+	utp_context* ctx = utp_init(2);
+	UtpCallbacks::InstallOnContext(ctx);
+
+	std::uint8_t our_hash[CUtpLayer::kUserHashSize];
+	std::uint8_t peer_hash[CUtpLayer::kUserHashSize];
+	fill_hash(our_hash,  0x10);
+	fill_hash(peer_hash, 0xA0);
+	sockaddr_in peer = make_peer_addr();
+
+	ASSERT_EQUALS((std::size_t)0, UtpLayerRegistry::Size());
+
+	{
+		CUtpLayer layer(ctx);
+		ASSERT_TRUE(layer.Connect(our_hash, peer_hash,
+		                          reinterpret_cast<sockaddr*>(&peer),
+		                          sizeof(peer)));
+
+		// Registry now contains this layer indexed by peer_hash.
+		ASSERT_EQUALS((std::size_t)1, UtpLayerRegistry::Size());
+		ASSERT_TRUE(UtpLayerRegistry::FindByPeerHash(peer_hash) == &layer);
+	}
+	// Layer destroyed — registry entry must be gone.
+	ASSERT_EQUALS((std::size_t)0, UtpLayerRegistry::Size());
+	ASSERT_TRUE(UtpLayerRegistry::FindByPeerHash(peer_hash) == NULL);
 
 	utp_destroy(ctx);
 	reset_global_state();

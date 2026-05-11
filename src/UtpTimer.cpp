@@ -23,6 +23,8 @@
 #ifdef ENABLE_NAT_T
 
 #include "UtpEnvironment.h"
+#include "UtpLayer.h"
+#include "UtpLayerRegistry.h"
 
 #include <utp.h>
 
@@ -50,15 +52,26 @@ std::condition_variable   g_wakeup_cv;
 
 void Tick()
 {
-	// Lock the runtime mutex around the libutp calls — matches the
-	// "callbacks run with lock held; callers must hold lock around
-	// every utp_* call" contract documented in UtpCallbacks.cpp.
-	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
-	utp_context* ctx = UtpEnvironment::GetContext();
-	if (ctx != NULL) {
-		utp_check_timeouts(ctx);
-		utp_issue_deferred_acks(ctx);
+	// Part 1: libutp's own machinery under the runtime lock.
+	{
+		std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+		utp_context* ctx = UtpEnvironment::GetContext();
+		if (ctx != NULL) {
+			utp_check_timeouts(ctx);
+			utp_issue_deferred_acks(ctx);
+		}
 	}
+
+	// Part 2: Phase B7.5 F4 — sweep registered CUtpLayer instances
+	// for connect-flow timeouts (KEY_FRAME_SENT layers past the 12 s
+	// deadline transition to FAILED). Runs OUTSIDE the runtime lock
+	// because each layer's CheckTimeoutNow re-acquires the lock
+	// itself; doing this under the runtime lock would deadlock on
+	// the non-recursive mutex.
+	UtpLayerRegistry::ForEach([](CUtpLayer* layer) {
+		layer->CheckTimeoutNow();
+	});
+
 	// Always increment, even when ctx is NULL — the counter is the
 	// timer's liveness signal. Tests check this value to verify the
 	// cadence is correct without needing a live utp_context.

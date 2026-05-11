@@ -110,6 +110,54 @@ bool UnwrapKeyFrame(const std::uint8_t* buf, std::size_t len,
 	return true;
 }
 
+bool WrapUtpFrame(const std::uint8_t* utp_packet,
+                  std::size_t utp_packet_len,
+                  const std::uint8_t receiver_hash[kUserHashSize],
+                  std::vector<std::uint8_t>& out)
+{
+	if (utp_packet == NULL || utp_packet_len == 0 ||
+	    receiver_hash == NULL || g_encrypt_fn == NULL) {
+		return false;
+	}
+
+	std::vector<std::uint8_t> ciphertext;
+	if (!g_encrypt_fn(utp_packet, utp_packet_len, receiver_hash, ciphertext)) {
+		return false;
+	}
+
+	// Envelope: [kOpByte, kUtpFrameSubByte, ciphertext].
+	out.clear();
+	out.reserve(2 + ciphertext.size());
+	out.push_back(UtpKeyFrame::kOpByte);
+	out.push_back(UtpKeyFrame::kUtpFrameSubByte);
+	out.insert(out.end(), ciphertext.begin(), ciphertext.end());
+	return true;
+}
+
+bool UnwrapUtpFrame(const std::uint8_t* buf, std::size_t len,
+                    std::uint32_t source_ip,
+                    std::vector<std::uint8_t>& plaintext_out)
+{
+	if (buf == NULL || g_decrypt_fn == NULL || len < 2) {
+		return false;
+	}
+	if (buf[0] != UtpKeyFrame::kOpByte ||
+	    buf[1] != UtpKeyFrame::kUtpFrameSubByte) {
+		return false;
+	}
+
+	// Decrypt the post-preamble bytes. No size check on the output —
+	// libutp will validate the packet shape via utp_process_udp.
+	if (!g_decrypt_fn(buf + 2, len - 2, source_ip, plaintext_out)) {
+		return false;
+	}
+	if (plaintext_out.empty()) {
+		// A 0-byte decrypt result can't be a valid uTP packet.
+		return false;
+	}
+	return true;
+}
+
 } // namespace UtpEncryption
 
 #endif // ENABLE_NAT_T

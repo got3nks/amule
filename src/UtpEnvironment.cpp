@@ -93,6 +93,20 @@ std::mutex& RuntimeLock()
 	return g_runtimeLock;
 }
 
+void ProcessInboundUtpPacket(const unsigned char* bytes, std::size_t len,
+                             const struct sockaddr* src,
+                             unsigned int src_len)
+{
+	if (bytes == NULL || len == 0 || src == NULL || src_len == 0) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(g_runtimeLock);
+	if (g_context == NULL) {
+		return;
+	}
+	utp_process_udp(g_context, bytes, len, src, src_len);
+}
+
 } // namespace UtpEnvironment
 
 #endif // ENABLE_NAT_T

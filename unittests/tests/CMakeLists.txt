@@ -269,6 +269,7 @@ add_executable (UtpEnvironmentTest
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
 )
 
 add_test (NAME UtpEnvironmentTest
@@ -303,6 +304,7 @@ add_executable (UtpCallbacksTest
 	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
 )
 
 add_test (NAME UtpCallbacksTest
@@ -339,6 +341,7 @@ add_executable (UtpLayerTest
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
 )
 
 add_test (NAME UtpLayerTest
@@ -426,6 +429,7 @@ add_executable (UtpConnectFlowTest
 	${CMAKE_SOURCE_DIR}/src/UtpEnvironment.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpKeyFrame.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
 )
 
 add_test (NAME UtpConnectFlowTest
@@ -463,6 +467,7 @@ add_executable (UtpTimerTest
 	${CMAKE_SOURCE_DIR}/src/UtpCallbacks.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpLayer.cpp
 	${CMAKE_SOURCE_DIR}/src/UtpEncryption.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
 )
 
 add_test (NAME UtpTimerTest
@@ -484,3 +489,27 @@ if (ENABLE_NAT_T)
 		utp
 	)
 endif()
+
+# Phase B7.5 of the NAT-T port: UtpLayerRegistry (follow-up F1).
+# The registry stores opaque CUtpLayer* values without dereferencing
+# them, so the test can pass synthetic pointers and skip the rest of
+# the NAT-T link chain. Compiles unconditionally; the test body
+# itself is guarded on ENABLE_NAT_T.
+add_executable (UtpLayerRegistryTest
+	UtpLayerRegistryTest.cpp
+	${CMAKE_SOURCE_DIR}/src/UtpLayerRegistry.cpp
+)
+
+add_test (NAME UtpLayerRegistryTest
+	COMMAND UtpLayerRegistryTest
+)
+
+target_include_directories (UtpLayerRegistryTest
+	PRIVATE ${CMAKE_BINARY_DIR}
+	PRIVATE ${CMAKE_SOURCE_DIR}/src
+	PRIVATE ${CMAKE_SOURCE_DIR}/src/include
+)
+
+target_link_libraries (UtpLayerRegistryTest
+	muleunit
+)

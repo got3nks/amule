@@ -25,6 +25,7 @@
 #include "UtpCallbacks.h"
 #include "UtpEncryption.h"
 #include "UtpEnvironment.h"
+#include "UtpLayerRegistry.h"
 
 #include <utp.h>
 
@@ -58,6 +59,12 @@ CUtpLayer::CUtpLayer(utp_context* ctx)
 CUtpLayer::~CUtpLayer()
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+	// Drop our registry entry before tearing down libutp resources.
+	// A concurrent inbound dispatch that snapshotted our pointer
+	// from FindByPeerHash before we entered the dtor is the layer
+	// owner's responsibility to coordinate — see UtpLayerRegistry's
+	// lifetime contract comment.
+	UtpLayerRegistry::Unregister(this);
 	TeardownSocketLocked();
 }
 
@@ -99,8 +106,19 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 	std::memcpy(m_peer_hash, peer_hash, kUserHashSize);
 	m_peer_addr.assign(reinterpret_cast<const std::uint8_t*>(peer_addr),
 	                   reinterpret_cast<const std::uint8_t*>(peer_addr) + addr_len);
-	m_peer_addr_len = addr_len;
-	m_state         = State::KEY_FRAME_SENT;
+	m_peer_addr_len        = addr_len;
+	m_connect_started_at   = std::chrono::steady_clock::now();
+	m_state                = State::KEY_FRAME_SENT;
+
+	// Publish in the process-wide registry under BOTH the peer's user
+	// hash (used by the inbound Key Frame dispatch in
+	// CClientUDPSocket::OnPacketReceived → OnPeerKeyFrame) AND the
+	// peer's sockaddr (used by UtpCallbacks::on_sendto to find the
+	// layer for outbound wrapping — libutp's send_to_addr path
+	// passes a NULL socket pointer so we can't dispatch via
+	// utp_get_userdata). The dtor unregisters both before freeing
+	// layer state.
+	UtpLayerRegistry::Register(m_peer_hash, this, peer_addr, addr_len);
 
 	return true;
 }
@@ -156,6 +174,28 @@ bool CUtpLayer::CheckTimeout(std::uint64_t elapsed_ms)
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
 	if (m_state == State::KEY_FRAME_SENT && elapsed_ms >= kKeyFrameTimeoutMs) {
+		m_state    = State::FAILED;
+		m_writable = false;
+		return true;
+	}
+	return false;
+}
+
+bool CUtpLayer::CheckTimeoutNow()
+{
+	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+
+	if (m_state != State::KEY_FRAME_SENT) {
+		// Fast path: timeouts only matter in KEY_FRAME_SENT. Saves
+		// the steady_clock read for the common case where most
+		// layers in the registry are in CONNECTED state.
+		return false;
+	}
+
+	const auto now     = std::chrono::steady_clock::now();
+	const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+		now - m_connect_started_at).count();
+	if (elapsed >= static_cast<std::int64_t>(kKeyFrameTimeoutMs)) {
 		m_state    = State::FAILED;
 		m_writable = false;
 		return true;
@@ -249,6 +289,37 @@ std::size_t CUtpLayer::ReadBufferSize() const
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 	return m_readBuf.size();
+}
+
+bool CUtpLayer::GetPeerHash(std::uint8_t out[kUserHashSize]) const
+{
+	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+	if (m_state == State::INIT) {
+		// Connect() never ran; peer_hash is the zero buffer from the
+		// ctor. Reporting "no peer hash yet" lets callers (e.g.
+		// on_sendto) drop rather than wrap with a garbage key.
+		return false;
+	}
+	std::memcpy(out, m_peer_hash, kUserHashSize);
+	return true;
+}
+
+void CUtpLayer::OnSendto(const std::uint8_t* buf, std::size_t len,
+                         const struct sockaddr* to, socklen_t to_len)
+{
+	// Lock NOT acquired here — caller (libutp via UtpCallbacks) holds it.
+	if (buf == NULL || len == 0 || to == NULL || to_len == 0) {
+		return;
+	}
+
+	// Wrap with [0xB2, 0x00, encrypt(packet, peer_hash)]. If wrap
+	// fails (no encrypt delegate installed, etc.) the packet is
+	// dropped — mandatory-encryption guarantee.
+	std::vector<std::uint8_t> wrapped;
+	if (!UtpEncryption::WrapUtpFrame(buf, len, m_peer_hash, wrapped)) {
+		return;
+	}
+	UtpCallbacks::SendRaw(wrapped.data(), wrapped.size(), to, to_len);
 }
 
 // --- Callback dispatch (caller holds RuntimeLock) --------------------

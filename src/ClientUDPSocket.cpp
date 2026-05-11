@@ -54,7 +54,18 @@
 #include "UtpEncryption.h"
 #include "UtpEnvironment.h"
 #include "UtpKeyFrame.h"
+#include "UtpLayer.h"
+#include "UtpLayerRegistry.h"
 #include "UtpTimer.h"
+// NOTE: do NOT #include <utp.h> here — libutp's utp_types.h defines
+// `typedef long long int64` which collides with aMule's
+// `typedef uint64_t int64` in src/Types.h. UtpEnvironment exposes
+// ProcessInboundUtpPacket as the lock-aware utp_process_udp wrapper
+// callers should use instead.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <vector>
 #endif
 
 //
@@ -161,17 +172,19 @@ void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer,
 					// default "Unknown opcode" branch and drop the
 					// packet — correct interop behavior.
 					//
-					// Phase B6 wiring:
-					//   sub-byte 0xFF: UnwrapKeyFrame to recover the
-					//     sender's user hash, then log + drop. The
-					//     "route to the matching CUtpLayer" step
-					//     lands in a later sub-commit once the layer
-					//     registry exists. The unwrap is done now so
-					//     a malformed frame is rejected at the
-					//     earliest layer.
-					//   sub-byte 0x00: log + drop. The uTP-frame path
-					//     (decrypt → utp_process_udp) lands together
-					//     with the layer registry.
+					// Phase B7.5 wiring:
+					//   sub-byte 0xFF: UnwrapKeyFrame → look up the
+					//     CUtpLayer registered for the recovered
+					//     sender_hash → call layer->OnPeerKeyFrame.
+					//     If no layer is waiting (unsolicited Key
+					//     Frame), log + drop.
+					//   sub-byte 0x00: UnwrapUtpFrame → feed the
+					//     plaintext uTP packet to utp_process_udp
+					//     under RuntimeLock. libutp's internal
+					//     routing finds the matching utp_socket by
+					//     source address; the on_read / state-change
+					//     callbacks then dispatch to the layer via
+					//     utp_get_userdata.
 					if (packetLen >= 2) {
 						uint8_t natSubByte = decryptedBuffer[1];
 						if (natSubByte == UtpKeyFrame::kSubByte) {
@@ -181,19 +194,52 @@ void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer,
 									static_cast<std::size_t>(packetLen),
 									ip,
 									sender_hash)) {
-								AddDebugLogLineN(logClientUDP, CFormat(
-									"NAT-T: received Key Frame from %s")
-									% Uint32_16toStringIP_Port(ip, port));
+								CUtpLayer* layer = UtpLayerRegistry::FindByPeerHash(sender_hash);
+								if (layer != NULL) {
+									layer->OnPeerKeyFrame(sender_hash);
+								} else {
+									AddDebugLogLineN(logClientUDP, CFormat(
+										"NAT-T: Key Frame from %s — no layer registered "
+										"for that peer hash (unsolicited; dropping)")
+										% Uint32_16toStringIP_Port(ip, port));
+								}
 							} else {
 								AddDebugLogLineN(logClientUDP, CFormat(
 									"NAT-T: malformed Key Frame from %s "
 									"(rejected by UnwrapKeyFrame)")
 									% Uint32_16toStringIP_Port(ip, port));
 							}
+						} else if (natSubByte == UtpKeyFrame::kUtpFrameSubByte) {
+							std::vector<uint8_t> plaintext;
+							if (UtpEncryption::UnwrapUtpFrame(
+									decryptedBuffer,
+									static_cast<std::size_t>(packetLen),
+									ip,
+									plaintext)) {
+								// Build a sockaddr_in for libutp's
+								// per-connection routing (it matches
+								// inbound packets against the utp_socket's
+								// stored peer address).
+								struct sockaddr_in src;
+								std::memset(&src, 0, sizeof(src));
+								src.sin_family      = AF_INET;
+								src.sin_port        = htons(port);
+								src.sin_addr.s_addr = htonl(ip);
+
+								UtpEnvironment::ProcessInboundUtpPacket(
+									plaintext.data(), plaintext.size(),
+									reinterpret_cast<struct sockaddr*>(&src),
+									sizeof(src));
+							} else {
+								AddDebugLogLineN(logClientUDP, CFormat(
+									"NAT-T: malformed uTP frame from %s "
+									"(rejected by UnwrapUtpFrame)")
+									% Uint32_16toStringIP_Port(ip, port));
+							}
 						} else {
 							AddDebugLogLineN(logClientUDP, CFormat(
-								"NAT-T: received OP_UDPRESERVEDPROT2 from %s, "
-								"sub=0x%02x len=%d (handler not wired yet)")
+								"NAT-T: OP_UDPRESERVEDPROT2 from %s with unknown "
+								"sub-byte 0x%02x (len=%d) — dropping")
 								% Uint32_16toStringIP_Port(ip, port)
 								% (unsigned)natSubByte % packetLen);
 						}

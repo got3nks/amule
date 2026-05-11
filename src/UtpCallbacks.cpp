@@ -25,6 +25,7 @@
 #include <utp.h>
 
 #include "UtpLayer.h"
+#include "UtpLayerRegistry.h"
 
 namespace UtpCallbacks {
 
@@ -116,12 +117,35 @@ uint64_t on_sendto(utp_callback_arguments* a)
 		return 0;
 	}
 
+	// Phase B7.5: if a CUtpLayer is registered for this destination
+	// address (the typical production path), let it wrap the bytes
+	// with the [0xB2, 0x00, encrypted] envelope before they hit the
+	// wire. The layer's OnSendto handles the WrapUtpFrame + SendRaw
+	// chain using the peer's user hash it recorded on Connect().
+	//
+	// Why look up by address rather than by a->socket: libutp's
+	// send_to_addr (utp_internal.cpp:712) is the function that
+	// ultimately invokes our on_sendto, and it ALWAYS passes NULL
+	// for the socket pointer in the callback args. So
+	// utp_get_userdata(a->socket) is unusable — we have to route
+	// via the destination address instead, which the layer
+	// registered alongside its peer_hash in Connect().
+	//
+	// Fallback (no layer registered for this addr): pass through raw.
+	// This path is hit by tests that exercise libutp directly via
+	// utp_create_socket without going through a CUtpLayer (e.g.
+	// UtpCallbacksTest's ConnectTriggersSendtoDelegate). Real NAT-T
+	// traffic always has a registered layer, so the wrap always
+	// happens in production.
+	CUtpLayer* layer = UtpLayerRegistry::FindByPeerAddr(a->address, a->address_len);
+	if (layer != NULL) {
+		layer->OnSendto(a->buf, a->len, a->address, a->address_len);
+		return 0;
+	}
+
 	SendtoFn fn       = g_sendto_fn;
 	void*    userdata = g_sendto_userdata;
 	if (fn == NULL) {
-		// No delegate installed — drop. Either nobody has wired up
-		// the UDP transport yet (early startup) or this is a test
-		// that explicitly doesn't care about outbound packets.
 		return 0;
 	}
 

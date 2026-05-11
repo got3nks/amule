@@ -114,6 +114,30 @@ bool UnwrapKeyFrame(const std::uint8_t* buf, std::size_t len,
                     std::uint32_t source_ip,
                     std::uint8_t sender_hash_out[kUserHashSize]);
 
+// Wrap a uTP frame (sub-byte 0x00): produces
+// [0xB2, 0x00, encrypt(utp_packet, key=receiver_hash)]. The uTP
+// packet itself is a fully-formed libutp datagram (variable length;
+// the encrypt step pads / framing-prepends per
+// CEncryptedDatagramSocket::EncryptSendClient's contract).
+// Returns false if no encrypt delegate is installed, the inputs are
+// NULL, or the encrypt delegate fails.
+bool WrapUtpFrame(const std::uint8_t* utp_packet,
+                  std::size_t utp_packet_len,
+                  const std::uint8_t receiver_hash[kUserHashSize],
+                  std::vector<std::uint8_t>& out);
+
+// Unwrap a uTP frame: validates the [0xB2, 0x00] preamble, then
+// decrypts the trailing payload via the registered DecryptFn.
+// Unlike UnwrapKeyFrame, no specific length check on the decrypted
+// payload — uTP packets are variable-length and validation is
+// libutp's job once we hand the bytes to utp_process_udp.
+//
+// The decrypted bytes are placed in `plaintext_out` so the caller
+// can feed them directly to utp_process_udp.
+bool UnwrapUtpFrame(const std::uint8_t* buf, std::size_t len,
+                    std::uint32_t source_ip,
+                    std::vector<std::uint8_t>& plaintext_out);
+
 } // namespace UtpEncryption
 
 #endif // ENABLE_NAT_T

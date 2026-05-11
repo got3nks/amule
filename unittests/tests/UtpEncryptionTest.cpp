@@ -426,6 +426,119 @@ TEST(UtpEncryption, UnwrapPropagatesDecryptFailure)
 }
 
 
+// --- Phase B7.5 additions: WrapUtpFrame / UnwrapUtpFrame ----------
+
+// WrapUtpFrame produces [0xB2, 0x00, encrypted_payload]. With
+// identity encrypt, the payload is the input verbatim. Verifies
+// envelope framing for the sub-byte-0x00 path.
+TEST(UtpEncryption, WrapUtpFrameBuildsCorrectEnvelopeWithIdentity)
+{
+	mock_reset();
+	UtpEncryption::SetEncryptDelegate(&identity_encrypt);
+
+	const std::uint8_t packet[] = { 0x41, 0xCC, 0xDE, 0xAD, 0xBE, 0xEF };
+	std::uint8_t receiver[UtpEncryption::kUserHashSize];
+	std::memset(receiver, 0xA0, sizeof(receiver));
+
+	std::vector<std::uint8_t> wire;
+	ASSERT_TRUE(UtpEncryption::WrapUtpFrame(packet, sizeof(packet),
+	                                       receiver, wire));
+	ASSERT_EQUALS((std::size_t)(2 + sizeof(packet)), wire.size());
+	ASSERT_EQUALS((int)0xB2, (int)wire[0]);
+	ASSERT_EQUALS((int)0x00, (int)wire[1]);
+	for (std::size_t i = 0; i < sizeof(packet); ++i) {
+		ASSERT_EQUALS((int)packet[i], (int)wire[2 + i]);
+	}
+}
+
+
+// Full WrapUtpFrame → UnwrapUtpFrame roundtrip with the XOR mock.
+// Variable-length payload (not the fixed 16 bytes Key Frames use)
+// must be preserved byte-for-byte.
+TEST(UtpEncryption, RoundtripUtpFrameXorMock)
+{
+	mock_reset();
+	UtpEncryption::SetEncryptDelegate(&xor_encrypt);
+	UtpEncryption::SetDecryptDelegate(&xor_decrypt);
+
+	std::uint8_t receiver_hash[UtpEncryption::kUserHashSize];
+	for (std::size_t i = 0; i < UtpEncryption::kUserHashSize; ++i) {
+		receiver_hash[i] = static_cast<std::uint8_t>(0x55 + i * 7);
+	}
+	std::memcpy(g_test_key, receiver_hash, sizeof(g_test_key));
+
+	// A 33-byte payload — odd size, exceeds the 16-byte hash window
+	// so the XOR mock wraps the key. Catches off-by-one in either
+	// direction.
+	std::vector<std::uint8_t> packet;
+	for (int i = 0; i < 33; ++i) {
+		packet.push_back(static_cast<std::uint8_t>(0x11 + i * 3));
+	}
+
+	std::vector<std::uint8_t> wire;
+	ASSERT_TRUE(UtpEncryption::WrapUtpFrame(packet.data(), packet.size(),
+	                                       receiver_hash, wire));
+	ASSERT_EQUALS((std::size_t)(2 + packet.size()), wire.size());
+
+	std::vector<std::uint8_t> recovered;
+	ASSERT_TRUE(UtpEncryption::UnwrapUtpFrame(wire.data(), wire.size(),
+	                                         0x7F000001u, recovered));
+	ASSERT_EQUALS(packet.size(), recovered.size());
+	for (std::size_t i = 0; i < packet.size(); ++i) {
+		ASSERT_EQUALS((int)packet[i], (int)recovered[i]);
+	}
+}
+
+
+// UnwrapUtpFrame rejects 0xFF sub-byte (that's a Key Frame, wrong
+// helper). And UnwrapKeyFrame rejects 0x00 sub-byte (wrong helper
+// for that envelope). Confirms the two unwrap functions enforce
+// distinct preambles.
+TEST(UtpEncryption, UnwrapHelpersAreSubByteDistinguished)
+{
+	mock_reset();
+	UtpEncryption::SetDecryptDelegate(&identity_decrypt);
+
+	std::vector<std::uint8_t> key_frame_wire;
+	key_frame_wire.push_back(0xB2);
+	key_frame_wire.push_back(0xFF);  // Key Frame sub-byte
+	for (int i = 0; i < 16; ++i) key_frame_wire.push_back((std::uint8_t)i);
+
+	std::vector<std::uint8_t> utp_frame_wire;
+	utp_frame_wire.push_back(0xB2);
+	utp_frame_wire.push_back(0x00);  // uTP frame sub-byte
+	for (int i = 0; i < 16; ++i) utp_frame_wire.push_back((std::uint8_t)i);
+
+	// UnwrapKeyFrame must accept 0xFF and reject 0x00.
+	std::uint8_t hash[UtpEncryption::kUserHashSize];
+	ASSERT_TRUE(UtpEncryption::UnwrapKeyFrame(
+		key_frame_wire.data(), key_frame_wire.size(), 0u, hash));
+	ASSERT_FALSE(UtpEncryption::UnwrapKeyFrame(
+		utp_frame_wire.data(), utp_frame_wire.size(), 0u, hash));
+
+	// UnwrapUtpFrame must accept 0x00 and reject 0xFF.
+	std::vector<std::uint8_t> plaintext;
+	ASSERT_TRUE(UtpEncryption::UnwrapUtpFrame(
+		utp_frame_wire.data(), utp_frame_wire.size(), 0u, plaintext));
+	ASSERT_FALSE(UtpEncryption::UnwrapUtpFrame(
+		key_frame_wire.data(), key_frame_wire.size(), 0u, plaintext));
+}
+
+
+// WrapUtpFrame respects mandatory-encryption — refuses to build a
+// plaintext envelope when no encrypt delegate is installed.
+TEST(UtpEncryption, WrapUtpFrameRefusesWithoutDelegate)
+{
+	mock_reset();
+
+	const std::uint8_t packet[] = { 0x41, 0x01, 0x02 };
+	std::uint8_t receiver[UtpEncryption::kUserHashSize] = {0};
+	std::vector<std::uint8_t> out;
+	ASSERT_FALSE(UtpEncryption::WrapUtpFrame(packet, sizeof(packet),
+	                                        receiver, out));
+}
+
+
 // NULL pointer arguments must be rejected cleanly.
 TEST(UtpEncryption, RejectsNullArguments)
 {

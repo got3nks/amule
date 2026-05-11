@@ -42,10 +42,12 @@
 // posted to the main thread. The lock is therefore held for microseconds
 // per call, not for whole packet-processing pipelines.
 
+#include <cstddef>
 #include <mutex>
 
 struct struct_utp_context;
 typedef struct struct_utp_context utp_context;
+struct sockaddr;
 
 namespace UtpEnvironment {
 
@@ -79,6 +81,21 @@ utp_context* GetContext();
 // this; std::mutex gives us the same semantics with portable RAII via
 // std::lock_guard.
 std::mutex& RuntimeLock();
+
+// Forward a decrypted uTP packet to libutp via utp_process_udp.
+// Acquires RuntimeLock internally; no-op if Init() hasn't been
+// called. This wrapper exists so callers (CClientUDPSocket inbound
+// dispatch) can drive libutp without #include <utp.h>, which would
+// pull in utp_types.h whose `typedef long long int64` collides with
+// aMule's own `typedef uint64_t int64` in src/Types.h.
+//
+//   bytes, len:   the decrypted uTP packet payload (Phase B7.5 F3
+//                 obtains these via UtpEncryption::UnwrapUtpFrame).
+//   src, src_len: sender's sockaddr — libutp uses this to look up
+//                 the matching utp_socket on the receiving side.
+void ProcessInboundUtpPacket(const unsigned char* bytes, std::size_t len,
+                             const struct sockaddr* src,
+                             unsigned int src_len);
 
 } // namespace UtpEnvironment
 

@@ -62,6 +62,7 @@
 // UtpEnvironment::RuntimeLock. Callback methods must NOT re-acquire
 // the lock (std::mutex is non-recursive).
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -156,16 +157,22 @@ public:
 	bool OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize]);
 
 	// Manual time-based timeout driver. `elapsed_ms` is the time
-	// since Connect() was called, in milliseconds — Phase B6 leaves
-	// the clock injection up to the caller so tests can advance time
-	// deterministically. Phase B7's wxTimer will record the Connect
-	// timestamp and call this with `now - start` every 50 ms.
+	// since Connect() was called, in milliseconds — kept for tests
+	// that need deterministic clock control. Production code uses
+	// CheckTimeoutNow() (below) instead.
 	//
 	// Effect: if state is KEY_FRAME_SENT and elapsed_ms >=
 	// kKeyFrameTimeoutMs, transition to FAILED.
 	//
 	// Returns true iff a state transition occurred.
 	bool CheckTimeout(std::uint64_t elapsed_ms);
+
+	// Steady-clock variant: computes elapsed_ms from the timestamp
+	// Connect() recorded internally, then delegates to CheckTimeout.
+	// This is what UtpTimer drives from its 50 ms tick. Returns true
+	// iff a state transition occurred; returns false (no-op) if
+	// Connect() was never called.
+	bool CheckTimeoutNow();
 
 	// Buffer up to count bytes for outbound transmission. Returns
 	// the number of bytes accepted into the buffer (0..count).
@@ -187,6 +194,26 @@ public:
 	bool        IsWritable()  const;
 	std::size_t WriteBufferSize() const;
 	std::size_t ReadBufferSize()  const;
+
+	// Copy the peer's recorded user hash into `out` (must point at
+	// kUserHashSize bytes). Returns true if Connect() has been called
+	// (the hash is set) and the copy succeeded. Used by
+	// UtpCallbacks::on_sendto to wrap outbound uTP frames with
+	// UtpEncryption::WrapUtpFrame.
+	bool GetPeerHash(std::uint8_t out[kUserHashSize]) const;
+
+	// Called by UtpCallbacks::on_sendto when libutp wants to emit
+	// bytes for this layer's socket. Wraps the bytes via
+	// UtpEncryption::WrapUtpFrame (using the recorded peer_hash as
+	// the encryption key) and pushes the resulting envelope through
+	// UtpCallbacks::SendRaw. If the wrap fails (no encrypt delegate,
+	// etc.), the packet is silently dropped — mandatory-encryption
+	// guarantee.
+	//
+	// Lock NOT acquired here (caller — libutp via UtpCallbacks —
+	// already holds RuntimeLock).
+	void OnSendto(const std::uint8_t* buf, std::size_t len,
+	              const struct sockaddr* to, socklen_t to_len);
 
 	// --- libutp callback dispatch -----------------------------------
 	//
@@ -225,6 +252,14 @@ private:
 
 	std::vector<std::uint8_t> m_writeBuf;
 	std::vector<std::uint8_t> m_readBuf;
+
+	// Timestamp recorded when Connect() transitions to KEY_FRAME_SENT.
+	// Used by CheckTimeoutNow() to compute elapsed_ms from steady_clock.
+	// Default-constructed value (epoch) indicates "Connect not called
+	// yet" — CheckTimeoutNow short-circuits in that case so the
+	// per-tick sweep in UtpTimer doesn't fire timeouts on layers that
+	// haven't started a handshake.
+	std::chrono::steady_clock::time_point m_connect_started_at;
 };
 
 #endif // ENABLE_NAT_T

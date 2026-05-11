@@ -68,6 +68,7 @@ namespace UtpKeyFrame {
 // breaks interop with eMuleAI.
 static constexpr std::uint8_t  kOpByte             = 0xB2; // OP_UDPRESERVEDPROT2
 static constexpr std::uint8_t  kSubByte            = 0xFF; // Key Frame
+static constexpr std::uint8_t  kUtpFrameSubByte    = 0x00; // uTP frame envelope
 static constexpr std::size_t   kUserHashSize       = 16;   // CMD4Hash bytes
 static constexpr std::size_t   kPlainEnvelopeSize  = 1 + 1 + kUserHashSize; // 18
 
