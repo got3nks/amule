@@ -175,4 +175,177 @@ bool FindRendezvousCandidates(const std::uint8_t* /*target_user_hash*/,
 	return false;
 }
 
+// --- Phase E6 wire helpers -----------------------------------------
+
+bool IsRequesterCallbackNullMarker(const std::uint8_t* buf_at_offset_16,
+                                   std::size_t remaining_len)
+{
+	if (buf_at_offset_16 == nullptr || remaining_len < kUserHashSize) {
+		return false;
+	}
+	for (std::size_t i = 0; i < kUserHashSize; ++i) {
+		if (buf_at_offset_16[i] != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool EncodeRequesterCallbackPayload(const RequesterCallbackPayload& payload,
+                                    std::vector<std::uint8_t>& out)
+{
+	out.clear();
+	// Worst-case length: 50 (mandatory) + 16 (file hash) + 6 (ext endpoint) = 72.
+	out.reserve(72);
+
+	// bytes 0-15: target's serving buddy KadID
+	out.insert(out.end(),
+	           payload.target_buddy_kadid,
+	           payload.target_buddy_kadid + kUserHashSize);
+
+	// bytes 16-31: NAT-T null marker (16 zero bytes). The presence
+	// of this all-zero block is what disambiguates this payload from
+	// the file-reask variant (which has a real file hash here).
+	out.insert(out.end(), kUserHashSize, std::uint8_t{0});
+
+	// byte 32: OP_RENDEZVOUS sub-marker
+	out.push_back(OP_RENDEZVOUS_OPCODE);
+
+	// bytes 33-48: requester user hash
+	out.insert(out.end(),
+	           payload.requester_user_hash,
+	           payload.requester_user_hash + kUserHashSize);
+
+	// byte 49: connect_options
+	out.push_back(payload.connect_options);
+
+	// Optional file hash (bytes 50-65). When neither file hash nor
+	// ext endpoint is present, the payload ends at 50 bytes.
+	if (payload.has_file_hash) {
+		out.insert(out.end(),
+		           payload.target_file_hash,
+		           payload.target_file_hash + kUserHashSize);
+	}
+
+	// Optional ext endpoint (6 bytes, little-endian IP + port). If we
+	// want to emit ext_endpoint but NO file_hash, we still emit
+	// directly here — the decoder uses the trailing-length math to
+	// distinguish "has ext only" (56 bytes) from "has file only"
+	// (66 bytes) from "has both" (72 bytes).
+	if (payload.has_ext_endpoint) {
+		AppendUInt32LE(out, payload.requester_ext_ip);
+		AppendUInt16LE(out, payload.requester_ext_port);
+	}
+
+	return true;
+}
+
+bool DecodeRequesterCallbackPayload(const std::uint8_t* buf, std::size_t len,
+                                    bool is_post_forward,
+                                    RequesterCallbackPayload& out)
+{
+	if (buf == nullptr) {
+		return false;
+	}
+
+	// Default the output struct so optional fields are clean.
+	std::memset(out.target_buddy_kadid, 0, kUserHashSize);
+	std::memset(out.requester_user_hash, 0, kUserHashSize);
+	out.connect_options = 0;
+	out.has_file_hash = false;
+	std::memset(out.target_file_hash, 0, kUserHashSize);
+	out.has_ext_endpoint = false;
+	out.requester_ext_ip = 0;
+	out.requester_ext_port = 0;
+
+	std::size_t pos = 0;
+
+	if (!is_post_forward) {
+		// Pre-forward (requester→buddy): payload starts with the
+		// target's serving buddy KadID at offset 0.
+		if (len < kRequesterCallbackMinSize) {
+			return false;
+		}
+		std::memcpy(out.target_buddy_kadid, buf, kUserHashSize);
+		pos = kUserHashSize;
+	}
+	// is_post_forward case: the buddy stripped the leading 16-byte
+	// KadID + replaced the next 6 bytes with [destIP:4][destPort:2]
+	// (or 22-byte v6 header). For NAT-T detection we want to look at
+	// the null marker which the buddy preserves at offset 0 of the
+	// post-forward payload (because the original null marker at
+	// pre-forward offset 16 maps to post-forward offset 0 after the
+	// buddy's 16-byte strip… wait that overlaps with the 6-byte
+	// destIP/Port the buddy wrote). See E6c notes for the resolution.
+	//
+	// For now, the post-forward path goes through ClientTCPSocket's
+	// dispatcher which calls us with `is_post_forward=true` AFTER the
+	// 6-byte [destIP][destPort] prefix has been consumed by the
+	// caller. So at entry, `buf` points at the null marker.
+
+	// bytes 16-31 (pre) or 0-15 (post): null marker. If non-zero,
+	// this is NOT a NAT-T payload — caller should fall through to
+	// the file-reask path.
+	if (len - pos < kUserHashSize) {
+		return false;
+	}
+	if (!IsRequesterCallbackNullMarker(buf + pos, len - pos)) {
+		return false;
+	}
+	pos += kUserHashSize;
+
+	// 1 byte: OP_RENDEZVOUS sub-marker. Sanity check it's actually
+	// 0xA0 — anything else is some other protocol we don't speak.
+	if (len - pos < 1) {
+		return false;
+	}
+	if (buf[pos] != OP_RENDEZVOUS_OPCODE) {
+		return false;
+	}
+	pos += 1;
+
+	// 16 bytes: requester user hash.
+	if (len - pos < kUserHashSize) {
+		return false;
+	}
+	std::memcpy(out.requester_user_hash, buf + pos, kUserHashSize);
+	pos += kUserHashSize;
+
+	// 1 byte: connect_options.
+	if (len - pos < 1) {
+		return false;
+	}
+	out.connect_options = buf[pos];
+	pos += 1;
+
+	// Trailing optional fields: file_hash (16) and ext_endpoint (6).
+	// Possibilities by remaining length: 0 (mandatory only), 6 (ext
+	// only — file hash slot omitted by eMuleAI when none available),
+	// 16 (file only), 22 (file + ext). Match against these patterns;
+	// anything else is malformed.
+	const std::size_t remaining = len - pos;
+	if (remaining == 0) {
+		// Mandatory-only payload. Done.
+	} else if (remaining == 6) {
+		out.has_ext_endpoint   = true;
+		out.requester_ext_ip   = ReadUInt32LE(buf + pos);
+		out.requester_ext_port = ReadUInt16LE(buf + pos + 4);
+	} else if (remaining == kUserHashSize) {
+		out.has_file_hash = true;
+		std::memcpy(out.target_file_hash, buf + pos, kUserHashSize);
+	} else if (remaining == kUserHashSize + 6) {
+		out.has_file_hash = true;
+		std::memcpy(out.target_file_hash, buf + pos, kUserHashSize);
+		pos += kUserHashSize;
+		out.has_ext_endpoint   = true;
+		out.requester_ext_ip   = ReadUInt32LE(buf + pos);
+		out.requester_ext_port = ReadUInt16LE(buf + pos + 4);
+	}
+	// Trailing-bytes pattern that doesn't match any known shape is
+	// silently tolerated — we keep the mandatory fields and ignore
+	// the tail (UDP padding behavior consistent with DecodeRendezvous).
+
+	return true;
+}
+
 } // namespace NatTraversal

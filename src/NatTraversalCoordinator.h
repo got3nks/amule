@@ -186,6 +186,28 @@ public:
 	                       socklen_t addr_hint_len,
 	                       RendezvousCompleteFn on_complete);
 
+	// Phase E6: register a pending rendezvous WITHOUT firing the
+	// outbound OP_RENDEZVOUS (the caller — CUpDownClient::TryNatTraversal
+	// — sends an eMuleAI-compatible OP_REASKCALLBACKUDP directly to
+	// the TARGET's serving buddy via CClientUDPSocket::SendPacket).
+	// The coordinator's only job here is bookkeeping: hold the pending
+	// entry so OnInboundHolePunch can match it when the target peer
+	// emits its HOLEPUNCH burst back to us.
+	//
+	// Match semantics: HOLEPUNCH arrives from the TARGET's UDP source
+	// address (target's GetConnectIP + GetKadPort, possibly NAT-mapped).
+	// We store target_addr in the pending entry's match-address slot;
+	// OnInboundHolePunch matches by source IP+port against this.
+	//
+	// Used INSTEAD OF RequestRendezvous for the E6 wire-protocol-aligned
+	// path. RequestRendezvous remains for the D2/D4 buddy + endpoint
+	// roles, which still use the FindBuddy delegate + OP_RENDEZVOUS
+	// envelope.
+	void RegisterPendingRendezvous(const std::uint8_t target_user_hash[kUserHashSize],
+	                               const struct sockaddr* target_addr,
+	                               socklen_t target_addr_len,
+	                               RendezvousCompleteFn on_complete);
+
 	// === Inbound dispatch entry points (called from C1) ============
 	//
 	// CClientUDPSocket's OP_RENDEZVOUS / OP_HOLEPUNCH case-bodies

@@ -44,6 +44,11 @@
 #include "ClientUDPSocket.h"	// Needed for CClientUDPSocket
 #include "PartFile.h"		// Needed for CPartFile
 #include "MemFile.h"		// Needed for CMemFile
+
+#ifdef ENABLE_NAT_T
+#include "NatTraversal.h"		// E6c: RequesterCallbackPayload + helpers
+#include "NatTraversalCoordinator.h"	// E6c: OnInboundRendezvous dispatch
+#endif
 #include "kademlia/kademlia/Kademlia.h" // Needed for CKademlia::Kademlia
 #include "kademlia/kademlia/Prefs.h"	// Needed for CKademlia::CPrefs
 #include "DownloadQueue.h"	// Needed for CDownloadQueue
@@ -1622,6 +1627,65 @@ bool CClientTCPSocket::ProcessExtPacket(const uint8_t* buffer, uint32 size, uint
 			CMemFile data_in(buffer, size);
 			uint32 destip = data_in.ReadUInt32();
 			uint16 destport = data_in.ReadUInt16();
+
+#ifdef ENABLE_NAT_T
+			// Phase E6c: detect the eMuleAI NAT-T payload variant. The
+			// next 16 bytes are either a real file hash (file-reask) or
+			// a null marker (NAT-T rendezvous forward). Null marker →
+			// decode as NAT-T and dispatch to the endpoint role; do NOT
+			// fall through to the file-reask logic below.
+			//
+			// Per-byte layout from offset 6 (after destip+destport):
+			//   bytes 0-15  : null marker (16 zero bytes) → NAT-T signal
+			//   byte  16    : OP_RENDEZVOUS sub-marker (0xA0)
+			//   bytes 17-32 : requester user hash
+			//   byte  33    : connect_options
+			//   bytes 34-49 : optional file hash
+			//   bytes 50-55 : optional requester ext_endpoint
+			// (See NatTraversal::EncodeRequesterCallbackPayload for the
+			// pre-forward layout; the buddy strips the leading 16-byte
+			// target_buddy_kadid, so what arrives at offset 6 of the
+			// TCP buffer is the same as offset 16 of the pre-forward
+			// payload.)
+			if (size >= 6 + NatTraversal::kUserHashSize) {
+				const std::uint8_t* nat_t_payload =
+					reinterpret_cast<const std::uint8_t*>(buffer) + 6;
+				const std::size_t nat_t_len = static_cast<std::size_t>(size) - 6;
+				if (NatTraversal::IsRequesterCallbackNullMarker(
+				        nat_t_payload, nat_t_len)) {
+					NatTraversal::RequesterCallbackPayload p;
+					if (NatTraversal::DecodeRequesterCallbackPayload(
+					        nat_t_payload, nat_t_len,
+					        /*is_post_forward=*/true, p)) {
+						AddDebugLogLineN(logClient,
+							CFormat(wxT("NAT-T (E6c): forwarded rendezvous from buddy %s; requester ext_endpoint %s:%u"))
+								% m_client->GetFullIP()
+								% Uint32toStringIP(destip) % destport);
+						// Synthesise a RendezvousRequest for the D4
+						// endpoint code path. ext_endpoint = the buddy-
+						// observed (destip, destport) — buddy filled
+						// these in at the OP_REASKCALLBACKUDP→TCP
+						// forwarding step.
+						NatTraversal::RendezvousRequest req;
+						std::memcpy(req.target_user_hash, p.requester_user_hash,
+						            NatTraversal::kUserHashSize);
+						req.connect_options    = p.connect_options;
+						req.has_file_hash      = p.has_file_hash;
+						if (req.has_file_hash) {
+							std::memcpy(req.target_file_hash, p.target_file_hash,
+							            NatTraversal::kUserHashSize);
+						}
+						req.has_ext_endpoint    = true;
+						req.requester_ext_ip    = destip;
+						req.requester_ext_port  = destport;
+						NatTraversal::CNatTraversalCoordinator::Instance()
+							.OnInboundRendezvous(req, /*src_ip=*/0, /*src_port=*/0);
+						break;  // do NOT fall through to file-reask logic
+					}
+				}
+			}
+#endif // ENABLE_NAT_T
+
 			CMD4Hash hash = data_in.ReadHash();
 			CKnownFile* reqfile = theApp->sharedfiles->GetFileByID(hash);
 

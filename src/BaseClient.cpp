@@ -39,6 +39,7 @@
 
 #include <protocol/Protocols.h>
 #include <protocol/ed2k/Client2Client/TCP.h>
+#include <protocol/ed2k/Client2Client/UDP.h>	// OP_REASKCALLBACKUDP (Phase E6)
 #include <protocol/ed2k/ClientSoftware.h>
 #include <protocol/kad/Client2Client/UDP.h>
 #include <protocol/kad2/Constants.h>
@@ -1472,72 +1473,118 @@ void NatTraversalComplete(CMD4Hash target_hash, bool ok, CUtpLayer* layer)
 } // namespace MuleNotify
 #endif
 
-// Phase E1: attempt to reach a LowID peer via NAT-T rendezvous.
-// Returns true if the rendezvous request was successfully handed
-// off to the coordinator (the caller defers DS_LOWTOLOWIP and waits
-// for OnNatTraversalComplete). Returns false on any eligibility miss
-// so the caller falls through to the existing LowID-callback /
-// LowID-to-LowID error fallback.
+// Phase E1 + E6: attempt to reach a LowID peer via NAT-T rendezvous.
+// Returns true if the rendezvous packet was sent off to the target's
+// serving buddy (the caller defers DS_LOWTOLOWIP and waits for
+// OnNatTraversalComplete). Returns false on any eligibility miss so
+// the caller falls through to the existing LowID-callback / LowID-to-
+// LowID error fallback.
 //
 // Eligibility (all must hold):
 //   - ENABLE_NAT_T compiled in
-//   - This peer advertised NAT-T support via Hello/DirectCallbackReq
-//   - We have the peer's external UDP endpoint (IP + Kad UDP port)
+//   - We know the target's serving buddy (HasValidBuddyID +
+//     GetBuddyIP/GetBuddyPort — populated by aMule's Kad
+//     source-exchange path in DownloadQueue.cpp:1646)
+//   - We know the target's external UDP endpoint (GetConnectIP +
+//     GetKadPort — needed for the post-HOLEPUNCH uTP connect)
 //   - No prior rendezvous is already in flight for this client
 //
-// E1 NOTE: success is currently stubbed in OnNatTraversalComplete —
-// the layer is deleted + we transition to DS_LOWTOLOWIP. E2 wires
-// the layer into a CClientTCPSocket-shaped facade; E3 hooks it up
-// to ConnectionEstablished and the Hello handshake.
+// Per Phase E6 (eMuleAI wire-protocol re-alignment): the requester
+// emits an OP_REASKCALLBACKUDP envelope per the eMuleAI byte layout
+// (see EncodeRequesterCallbackPayload in NatTraversal.cpp) and sends
+// it directly to the TARGET's BuddyIP:BuddyPort. The target's buddy
+// matches the embedded ServingBuddyKadID against its served-buddy
+// list (D5c gave us FindServedBuddyByKadID) and forwards as
+// OP_REASKCALLBACKTCP via TCP to the target. The target then emits
+// the HOLEPUNCH burst back to us; OnInboundHolePunch matches it
+// against our pending entry (registered via RegisterPendingRendezvous)
+// and fires OnNatTraversalComplete with the connected uTP layer.
+//
+// We DO NOT use the coordinator's FindBuddy delegate (D5a) any more —
+// we know the buddy address directly from per-target Kad data, which
+// is the eMuleAI semantic for buddy selection.
 bool CUpDownClient::TryNatTraversal()
 {
 #ifdef ENABLE_NAT_T
 	if (m_fNatTraversalInFlight) {
-		// Already racing the coordinator — don't fire a second one.
+		// Already in flight — don't fire a second one.
 		return true;
 	}
-	if (!SupportsNatTraversal()) {
+
+	// E6 eligibility: target's buddy info (where we send the rendezvous)
+	// + target's external endpoint (where we'll uTP-connect post-HOLEPUNCH).
+	if (!HasValidBuddyID() || GetBuddyIP() == 0 || GetBuddyPort() == 0) {
 		return false;
 	}
-	// Need the peer's external UDP endpoint to drive the post-HOLEPUNCH
-	// uTP connect. Same pair the DirectCallback path uses (GetConnectIP +
-	// GetKadPort) — if either is zero we have nothing to connect to.
 	const uint32 peer_ip   = GetConnectIP();
 	const uint16 peer_port = GetKadPort();
 	if (peer_ip == 0 || peer_port == 0) {
 		return false;
 	}
 
-	// Phase E5: the coordinator's callback may fire on UtpTimer's
-	// std::thread or boost::asio's worker thread. Both are NOT
-	// main-thread-safe for theApp/CClientList/CUpDownClient access.
-	// Marshal via CoreNotify_NatTraversalComplete which wxQueueEvent's
-	// onto wxTheApp; the dispatcher (MuleNotify::NatTraversalComplete
-	// in this file) does the CClientList lookup + OnNatTraversalComplete
-	// call on the main thread. Capture target_hash by value (POD) so
-	// the lambda is self-contained across the thread boundary.
+	// Build the eMuleAI-compatible OP_REASKCALLBACKUDP payload.
+	NatTraversal::RequesterCallbackPayload payload;
+	std::memcpy(payload.target_buddy_kadid, GetBuddyID(), 16);
+	std::memcpy(payload.requester_user_hash, thePrefs::GetUserHash().GetHash(), 16);
+	payload.connect_options = Kademlia::CPrefs::GetMyConnectOptions(
+		/*encryption=*/true, /*callback=*/false, /*natTraversal=*/true);
+	payload.has_file_hash    = false;
+	if (m_reqfile != nullptr) {
+		const CMD4Hash& fh = m_reqfile->GetFileHash();
+		std::memcpy(payload.target_file_hash, fh.GetHash(), 16);
+		payload.has_file_hash = true;
+	}
+	// Advertise our external UDP endpoint so the target can HOLEPUNCH
+	// back to us. Use Kad's external IP + our own UDP port.
+	payload.has_ext_endpoint = false;
+	const uint32 our_ext_ip = Kademlia::CKademlia::IsRunning()
+	                         ? Kademlia::CKademlia::GetIPAddress()
+	                         : 0;
+	const uint16 our_udp_port = thePrefs::GetEffectiveUDPPort();
+	if (our_ext_ip != 0 && our_udp_port != 0) {
+		payload.requester_ext_ip   = our_ext_ip;
+		payload.requester_ext_port = our_udp_port;
+		payload.has_ext_endpoint   = true;
+	}
+
+	std::vector<std::uint8_t> body;
+	if (!NatTraversal::EncodeRequesterCallbackPayload(payload, body)) {
+		return false;
+	}
+
+	// Wrap in OP_EMULEPROT + OP_REASKCALLBACKUDP, send to target's buddy.
+	CMemFile mem;
+	mem.Write(body.data(), body.size());
+	CPacket* packet = new CPacket(mem, OP_EMULEPROT, OP_REASKCALLBACKUDP);
+	theStats::AddUpOverheadFileRequest(packet->GetPacketSize());
+	theApp->clientudp->SendPacket(packet,
+	                              GetBuddyIP(), GetBuddyPort(),
+	                              /*bEncrypt=*/false, /*pachTargetClientHashORKadID=*/nullptr,
+	                              /*bKad=*/false, /*nReceiverVerifyKey=*/0);
+
+	// Register the pending entry so OnInboundHolePunch can match the
+	// target's HOLEPUNCH burst back to us. Match address is the target's
+	// external UDP endpoint (GetConnectIP + GetKadPort). The callback
+	// posts via CoreNotify_NatTraversalComplete (E5 thread marshal).
 	CMD4Hash target_hash = GetUserHash();
 	auto on_complete = [target_hash](bool ok, CUtpLayer* layer) {
 		CoreNotify_NatTraversalComplete(target_hash, ok, layer);
 	};
-
 	sockaddr_in target_addr;
 	std::memset(&target_addr, 0, sizeof(target_addr));
 	target_addr.sin_family      = AF_INET;
-	// GetConnectIP() returns network-byte-order on aMule's convention;
-	// sockaddr_in expects network-byte-order too. No swap needed.
 	target_addr.sin_addr.s_addr = peer_ip;
 	target_addr.sin_port        = htons(peer_port);
-
-	NatTraversal::CNatTraversalCoordinator::Instance().RequestRendezvous(
-		GetUserHash().GetHash(),
+	NatTraversal::CNatTraversalCoordinator::Instance().RegisterPendingRendezvous(
+		target_hash.GetHash(),
 		reinterpret_cast<sockaddr*>(&target_addr),
 		sizeof(target_addr),
 		std::move(on_complete));
 
 	m_fNatTraversalInFlight = 1;
 	AddDebugLogLineN(logClient,
-		CFormat(wxT("NAT-T rendezvous requested for LowID peer %s (kad UDP %u)"))
+		CFormat(wxT("NAT-T rendezvous (E6) sent to buddy %s:%u for target %s (kad UDP %u)"))
+			% Uint32toStringIP(GetBuddyIP()) % GetBuddyPort()
 			% GetFullIP() % peer_port);
 	return true;
 #else

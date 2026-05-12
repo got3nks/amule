@@ -298,29 +298,58 @@ void CClientUDPSocket::ProcessPacket(uint8_t* packet, int16 size, int8 opcode, u
 		case OP_REASKCALLBACKUDP: {
 			AddDebugLogLineN( logClientUDP, "Client UDP socket; OP_REASKCALLBACKUDP" );
 			theStats::AddDownOverheadOther(size);
-			CUpDownClient* buddy = theApp->clientlist->GetBuddy();
-			if( buddy ) {
-				if( size < 17 || buddy->GetSocket() == NULL ) {
-					break;
-				}
-				if (!md4cmp(packet, buddy->GetBuddyID())) {
-					/*
-						The packet has an initial 16 bytes key for the buddy.
-						This is currently unused, so to make the transformation
-						we discard the first 10 bytes below and then overwrite
-						the other 6 with ip/port.
-					*/
-					CMemFile mem_packet(packet+10,size-10);
-					// Change the ip and port while leaving the rest untouched
-					mem_packet.Seek(0,wxFromStart);
-					mem_packet.WriteUInt32(host);
-					mem_packet.WriteUInt16(port);
-					CPacket* response = new CPacket(mem_packet, OP_EMULEPROT, OP_REASKCALLBACKTCP);
-					AddDebugLogLineN( logClientUDP, "Client UDP socket: send OP_REASKCALLBACKTCP" );
-					theStats::AddUpOverheadFileRequest(response->GetPacketSize());
-					buddy->GetSocket()->SendPacket(response);
+			if (size < 17) {
+				break;
+			}
+
+			// Phase E6b: the first 16 bytes of the payload are the
+			// target peer's serving-buddy KadID. Two match paths:
+			//   1. D5c served-buddy table (a LowID peer we accepted
+			//      as a served buddy in our slot-2+ pool). This is
+			//      the eMuleAI-compatible path — works for NAT-T
+			//      rendezvous from ANY requester, not just our own
+			//      single buddy.
+			//   2. Our single legacy buddy (m_pBuddy via GetBuddy()).
+			//      Kept for backward compat with vanilla aMule peers
+			//      that use the pre-D5c flow.
+			CUpDownClient* forward_target = nullptr;
+			Kademlia::CUInt128 kad_id(packet);
+			forward_target = theApp->clientlist->FindServedBuddyByKadID(kad_id);
+
+			if (forward_target == nullptr) {
+				CUpDownClient* legacy_buddy = theApp->clientlist->GetBuddy();
+				if (legacy_buddy != nullptr && !md4cmp(packet, legacy_buddy->GetBuddyID())) {
+					forward_target = legacy_buddy;
 				}
 			}
+			if (forward_target == nullptr || forward_target->GetSocket() == nullptr) {
+				AddDebugLogLineN(logClientUDP,
+					CFormat(wxT("OP_REASKCALLBACKUDP: no served-buddy match; sender=%s:%u"))
+						% Uint32toStringIP(host) % port);
+				break;
+			}
+
+			/*
+				The packet has an initial 16 bytes key for the buddy.
+				This is currently unused, so to make the transformation
+				we discard the first 10 bytes below and then overwrite
+				the other 6 with ip/port.
+
+				Phase E6 note: when this payload is the eMuleAI NAT-T
+				rendezvous variant, the bytes at offset 16-31 are the
+				null marker (which becomes offset 6-21 in the forwarded
+				packet) — the target detects the NAT-T pattern there in
+				its OP_REASKCALLBACKTCP handler.
+			*/
+			CMemFile mem_packet(packet+10,size-10);
+			// Change the ip and port while leaving the rest untouched
+			mem_packet.Seek(0,wxFromStart);
+			mem_packet.WriteUInt32(host);
+			mem_packet.WriteUInt16(port);
+			CPacket* response = new CPacket(mem_packet, OP_EMULEPROT, OP_REASKCALLBACKTCP);
+			AddDebugLogLineN( logClientUDP, "Client UDP socket: send OP_REASKCALLBACKTCP" );
+			theStats::AddUpOverheadFileRequest(response->GetPacketSize());
+			forward_target->GetSocket()->SendPacket(response);
 			break;
 		}
 		case OP_REASKFILEPING: {

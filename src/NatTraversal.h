@@ -215,6 +215,88 @@ bool EncodeRendezvous(const RendezvousRequest& req,
 bool DecodeRendezvous(const std::uint8_t* buf, std::size_t len,
                       RendezvousRequest& out);
 
+// --- Phase E6: eMuleAI-compatible OP_REASKCALLBACKUDP payload ------
+//
+// The wire-protocol re-alignment that lets aMule peers interop with
+// eMuleAI on the requester→buddy direction of the rendezvous flow.
+// Discovered during E4 investigation that our Phase D2/D3 wire
+// (top-level OP_RENDEZVOUS + FindBuddy delegate) was a divergent
+// parallel protocol; eMuleAI reuses the existing OP_REASKCALLBACKUDP
+// opcode that aMule already implements for the LowID file-reask path
+// — distinguished by a "null marker" pattern at bytes 16-31.
+//
+// Wire layout (matches eMuleAI BaseClient.cpp:2869-2920 byte-for-byte):
+//
+//   bytes  0-15 : target peer's ServingBuddyKadID  (mandatory)
+//   bytes 16-31 : null marker (16 zero bytes)      (mandatory, signals NAT-T variant)
+//   byte   32   : OP_RENDEZVOUS sub-marker (0xA0)  (mandatory)
+//   bytes 33-48 : requester's user hash            (mandatory)
+//   byte   49   : connect_options                  (mandatory)
+//   bytes 50-65 : file hash                        (optional)
+//   bytes 66-71 : requester ext_endpoint            (optional: ip:4 little-endian, port:2 little-endian)
+//
+// Mandatory size = 50 bytes; with file hash = 66; with ext_endpoint
+// only = 56; with both = 72.
+//
+// The "null marker" at bytes 16-31 is what disambiguates this from
+// the original LowID-file-reask payload (which has a real file hash
+// at that offset). aMule's existing buddy-side handler at
+// CClientUDPSocket::ProcessPacket(OP_REASKCALLBACKUDP) preserves
+// bytes 16+ when forwarding as OP_REASKCALLBACKTCP, so the
+// sub-marker flows through to the target intact — exactly the
+// pattern E6c relies on.
+static constexpr std::size_t kRequesterCallbackBuddyIdOffset    = 0;
+static constexpr std::size_t kRequesterCallbackNullMarkerOffset = 16;
+static constexpr std::size_t kRequesterCallbackSubOpcodeOffset  = 32;
+static constexpr std::size_t kRequesterCallbackUserHashOffset   = 33;
+static constexpr std::size_t kRequesterCallbackConnectOptsOffset= 49;
+static constexpr std::size_t kRequesterCallbackMinSize          = 50;
+static constexpr std::size_t kRequesterCallbackFileHashOffset   = 50;
+static constexpr std::size_t kRequesterCallbackExtIpOffsetNoFile= 50;
+static constexpr std::size_t kRequesterCallbackExtIpOffsetFile  = 66;
+
+struct RequesterCallbackPayload {
+	std::uint8_t  target_buddy_kadid[kUserHashSize];
+	std::uint8_t  requester_user_hash[kUserHashSize];
+	std::uint8_t  connect_options;
+	bool          has_file_hash;
+	std::uint8_t  target_file_hash[kUserHashSize];
+	bool          has_ext_endpoint;
+	std::uint32_t requester_ext_ip;     // network byte order — wire stores little-endian, helper handles conversion
+	std::uint16_t requester_ext_port;   // host byte order
+};
+
+// Build the eMuleAI-compatible OP_REASKCALLBACKUDP payload. Returns
+// false on NULL out (defensive). out is cleared on entry.
+//
+// Caller is responsible for wrapping this in an OP_EMULEPROT envelope
+// with opcode OP_REASKCALLBACKUDP (0x94) and sending to the target's
+// BuddyIP:BuddyPort via CClientUDPSocket::SendPacket.
+bool EncodeRequesterCallbackPayload(const RequesterCallbackPayload& payload,
+                                    std::vector<std::uint8_t>& out);
+
+// Try to decode the eMuleAI NAT-T payload from an OP_REASKCALLBACKUDP
+// or OP_REASKCALLBACKTCP buffer. Returns true ONLY if the null-marker
+// pattern at bytes 16-31 is present (i.e. this is a NAT-T payload,
+// NOT a file-reask payload).
+//
+// For OP_REASKCALLBACKTCP (target side), the buddy has prepended a
+// 6-byte header [destIP:4][destPort:2] before forwarding — pass the
+// buffer past that header (offset +6) and the buddy_kadid bytes are
+// gone (consumed by the buddy). Callers passing post-forward bytes
+// should set `is_post_forward=true`; the decoder skips the buddy_kadid
+// field expectation in that case.
+bool DecodeRequesterCallbackPayload(const std::uint8_t* buf, std::size_t len,
+                                    bool is_post_forward,
+                                    RequesterCallbackPayload& out);
+
+// Helper: returns true if the 16-byte block at `buf` is all zero
+// bytes — the NAT-T null-marker pattern at offset 16 of the payload.
+// Exposed so the buddy-side dispatcher in CClientUDPSocket can
+// cheaply distinguish NAT-T from file-reask without a full decode.
+bool IsRequesterCallbackNullMarker(const std::uint8_t* buf_at_offset_16,
+                                   std::size_t remaining_len);
+
 // HOLEPUNCH has no body. The pair below exists for symmetry and to
 // future-proof callers — if a future protocol version adds payload
 // bytes, callers can extend the helpers without touching the

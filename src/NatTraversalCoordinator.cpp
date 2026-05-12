@@ -166,6 +166,66 @@ void CNatTraversalCoordinator::RequestRendezvous(
 	}
 }
 
+void CNatTraversalCoordinator::RegisterPendingRendezvous(
+	const std::uint8_t target_user_hash[kUserHashSize],
+	const struct sockaddr* target_addr,
+	socklen_t target_addr_len,
+	RendezvousCompleteFn on_complete)
+{
+	if (target_user_hash == nullptr || target_addr == nullptr ||
+	    target_addr_len == 0 || !on_complete) {
+		if (on_complete) {
+			on_complete(false, nullptr);
+		}
+		return;
+	}
+
+	// Stage entry before touching table (replace-existing pattern from
+	// RequestRendezvous — cancelled callback fires outside the lock).
+	RendezvousCompleteFn cancelled_cb;
+	HashKey key;
+	std::memcpy(key.data(), target_user_hash, kUserHashSize);
+
+	PendingRendezvous pending;
+	pending.deadline_ms = 0;  // set lazily by next CheckTimeouts call
+	pending.target_addr.assign(
+		reinterpret_cast<const std::uint8_t*>(target_addr),
+		reinterpret_cast<const std::uint8_t*>(target_addr) + target_addr_len);
+	pending.target_addr_len = target_addr_len;
+	pending.on_complete = std::move(on_complete);
+
+	// Match semantics: HOLEPUNCH from the TARGET (per eMuleAI flow,
+	// where the buddy forwards via TCP and the target initiates the
+	// HOLEPUNCH burst to the requester's ext_endpoint). Store target's
+	// IP:port in the same `buddy_ip_host` / `buddy_udp_port` slot used
+	// by OnInboundHolePunch — field-name abuse, but the matching logic
+	// works correctly because OnInboundHolePunch's job is "find a
+	// pending entry whose stored match-address equals the inbound
+	// HOLEPUNCH source". RequestRendezvous (D3) uses the same slot
+	// to hold buddy's address (their HOLEPUNCH source); E6 uses it
+	// for target's address. Either way the match fires.
+	const sockaddr_in* sin = reinterpret_cast<const sockaddr_in*>(target_addr);
+	pending.buddy_ip_host   = ntohl(sin->sin_addr.s_addr);
+	pending.buddy_udp_port  = ntohs(sin->sin_port);
+
+	std::memcpy(pending.peer_user_hash.data(), target_user_hash, kUserHashSize);
+	pending.our_user_hash = m_our_user_hash;
+
+	{
+		std::lock_guard<std::mutex> lock(m_lock);
+		auto existing = m_pending.find(key);
+		if (existing != m_pending.end()) {
+			cancelled_cb = std::move(existing->second.on_complete);
+			m_pending.erase(existing);
+		}
+		m_pending[key] = std::move(pending);
+	}
+
+	if (cancelled_cb) {
+		cancelled_cb(false, nullptr);
+	}
+}
+
 void CNatTraversalCoordinator::OnInboundRendezvous(
 	const RendezvousRequest& req,
 	std::uint32_t src_ip_host,
