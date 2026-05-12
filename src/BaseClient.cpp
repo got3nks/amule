@@ -584,6 +584,21 @@ bool CUpDownClient::ProcessHelloTypePacket(const CMemFile& data)
 				break;
 			}
 
+#ifdef ENABLE_NAT_T
+			case CT_MOD_MISCOPTIONS:
+				// Phase E4: decode the eMuleAI Hello bitfield. We only
+				// consume the NAT-T bit today; the other bits
+				// (ExtendedXS / IPv6 / ServingBuddyPull) are
+				// eMuleAI-specific and out of scope for our port.
+				// Old eMule / vanilla aMule peers don't send this
+				// tag at all — m_fSupportsNatTraversal stays at the
+				// ctor-init default (0).
+				SetNatTraversalSupport(
+					NatTraversal::DecodeNatTraversalFromModMiscOptions(
+						static_cast<std::uint32_t>(temptag.GetInt())));
+				break;
+
+#endif
 			case CT_EMULE_MISCOPTIONS2:
 				//  19 Reserved
 				//   1 Direct UDP Callback supported and available
@@ -1157,6 +1172,21 @@ void CUpDownClient::SendHelloTypePacket(CMemFile* data)
 				, GetVBTTags() ? 0 : 32	);
 	tagMisOptions2.WriteTagToFile(data);
 
+#ifdef ENABLE_NAT_T
+	// Phase E4: advertise NAT-T support via CT_MOD_MISCOPTIONS (the
+	// eMuleAI Hello tag, wire-compatible with their UModMiscOptions
+	// bitfield). Old eMule / vanilla aMule peers skip this unknown
+	// tag — exactly the right default (they don't support NAT-T).
+	// eMuleAI peers + future aMule peers decode the bit and flip
+	// m_fSupportsNatTraversal=true, gating future TryNatTraversal
+	// eligibility checks.
+	const std::uint32_t nat_t_misc_options =
+		NatTraversal::BuildModMiscOptionsForHello(/*supports_nat=*/true);
+	CTagVarInt tagModMiscOptions(CT_MOD_MISCOPTIONS, nat_t_misc_options,
+	                             GetVBTTags() ? 0 : 32);
+	tagModMiscOptions.WriteTagToFile(data);
+#endif
+
 	const uint32 nOSInfoSupport			= 1; // We support OS_INFO
 	const uint32 nValueBasedTypeTags	= 0; // Experimental, disabled
 
@@ -1400,6 +1430,48 @@ bool CUpDownClient::Disconnected(const wxString& DEBUG_ONLY(strReason), bool bFr
 	return bDelete;
 }
 
+#ifdef ENABLE_NAT_T
+// Phase E5: main-thread dispatch for NAT-T rendezvous completion.
+// Called via CoreNotify_NatTraversalComplete (which wxQueueEvent's
+// onto wxTheApp) so theApp/CClientList/CUpDownClient access is
+// guaranteed to be on the main thread, regardless of which thread
+// the coordinator's callback fired on (typically UtpTimer's tick
+// thread or the boost::asio worker thread).
+namespace MuleNotify {
+void NatTraversalComplete(CMD4Hash target_hash, bool ok, CUtpLayer* layer)
+{
+	if (theApp == nullptr || theApp->clientlist == nullptr) {
+		delete layer;  // safe on null
+		return;
+	}
+	CClientList::SourceList sources = theApp->clientlist->GetClientsByHash(target_hash);
+	if (sources.empty()) {
+		delete layer;
+		return;
+	}
+	// Prefer the client that initiated the rendezvous (in-flight flag set);
+	// otherwise fall through to the first matching client. The selected
+	// client takes ownership of the layer via OnNatTraversalComplete.
+	CUpDownClient* target = nullptr;
+	for (const CClientRef& ref : sources) {
+		CUpDownClient* c = ref.GetClient();
+		if (c && c->IsNatTraversalInFlight()) {
+			target = c;
+			break;
+		}
+	}
+	if (target == nullptr) {
+		target = sources.front().GetClient();
+	}
+	if (target == nullptr) {
+		delete layer;
+		return;
+	}
+	target->OnNatTraversalComplete(ok, layer);
+}
+} // namespace MuleNotify
+#endif
+
 // Phase E1: attempt to reach a LowID peer via NAT-T rendezvous.
 // Returns true if the rendezvous request was successfully handed
 // off to the coordinator (the caller defers DS_LOWTOLOWIP and waits
@@ -1436,43 +1508,17 @@ bool CUpDownClient::TryNatTraversal()
 		return false;
 	}
 
-	// Capture by hash (POD, safe across thread boundaries). On callback
-	// fire-time we look the client up in CClientList — if it was deleted
-	// in the meantime, the layer is dropped cleanly. Mirrors the
-	// AddDirectCallbackClient pattern used by DirectCallback.
-	// E1 NOTE: the callback fires from the rendezvous coordinator,
-	// possibly on UtpTimer's thread. Accessing theApp / CClientList
-	// from a non-main thread is unsafe in general; documenting as a
-	// known concern for E3 to address via wxPostEvent or equivalent.
+	// Phase E5: the coordinator's callback may fire on UtpTimer's
+	// std::thread or boost::asio's worker thread. Both are NOT
+	// main-thread-safe for theApp/CClientList/CUpDownClient access.
+	// Marshal via CoreNotify_NatTraversalComplete which wxQueueEvent's
+	// onto wxTheApp; the dispatcher (MuleNotify::NatTraversalComplete
+	// in this file) does the CClientList lookup + OnNatTraversalComplete
+	// call on the main thread. Capture target_hash by value (POD) so
+	// the lambda is self-contained across the thread boundary.
 	CMD4Hash target_hash = GetUserHash();
 	auto on_complete = [target_hash](bool ok, CUtpLayer* layer) {
-		CClientList::SourceList sources = theApp->clientlist->GetClientsByHash(target_hash);
-		if (sources.empty()) {
-			// Every CUpDownClient pointing at this user vanished.
-			// Drop the layer cleanly.
-			delete layer;
-			return;
-		}
-		// Hand off to the first in-flight client we find; if none of
-		// them are flagged, fall through to the first one (the
-		// rendezvous still completed — its owner may have been
-		// deleted but a replacement exists).
-		CUpDownClient* target = nullptr;
-		for (const CClientRef& ref : sources) {
-			CUpDownClient* c = ref.GetClient();
-			if (c && c->IsNatTraversalInFlight()) {
-				target = c;
-				break;
-			}
-		}
-		if (target == nullptr) {
-			target = sources.front().GetClient();
-		}
-		if (target == nullptr) {
-			delete layer;
-			return;
-		}
-		target->OnNatTraversalComplete(ok, layer);
+		CoreNotify_NatTraversalComplete(target_hash, ok, layer);
 	};
 
 	sockaddr_in target_addr;

@@ -31,6 +31,9 @@
 
 #include "Types.h"
 #include "Constants.h"
+#ifdef ENABLE_NAT_T
+#include "MD4Hash.h"	// Phase E5: NatTraversalComplete payload type
+#endif
 #define __need_convertinfo	// We need only the ConvertInfo struct from PartFileConvert.h
 #include "PartFileConvert.h"
 
@@ -191,6 +194,20 @@ namespace MuleNotify
 	void ServerTCPAccept(CLibSocketServer * socketServer);
 	void UDPSocketSend(CMuleUDPSocket * socket);
 	void UDPSocketReceive(CMuleUDPSocket * socket);
+
+#ifdef ENABLE_NAT_T
+	// Phase E5: NAT-T rendezvous completion. The coordinator's
+	// callback may fire on UtpTimer's tick thread (B7's std::thread)
+	// — but CClientList lookup + CUpDownClient state mutation are
+	// main-thread-only. This notifier wraps the dispatch: the
+	// lambda in CUpDownClient::TryNatTraversal calls
+	// CoreNotify_NatTraversalComplete(hash, ok, layer) which
+	// wxQueueEvent's onto the main thread via the same mechanism
+	// LibSocketReceive uses. Dispatcher (in GuiEvents.cpp) does
+	// the CClientList::GetClientsByHash + IsNatTraversalInFlight
+	// match + OnNatTraversalComplete call, all on the main thread.
+	void NatTraversalComplete(CMD4Hash target_hash, bool ok, class CUtpLayer * layer);
+#endif
 
 	//
 	// Notifications that always create an event
@@ -590,6 +607,15 @@ typedef void (wxEvtHandler::*MuleNotifyEventFunction)(CMuleGUIEvent&);
 #define CoreNotify_UDPSocketSend(ptr)				MuleNotify::DoNotifyAlways(&MuleNotify::UDPSocketSend, ptr)
 #define CoreNotify_UDPSocketReceive(ptr)			MuleNotify::DoNotifyAlways(&MuleNotify::UDPSocketReceive, ptr)
 #define CoreNotify_ProxySocketEvent(ptr, val)		MuleNotify::DoNotifyAlways(&MuleNotify::ProxySocketEvent, ptr, val)
+
+#ifdef ENABLE_NAT_T
+// Phase E5: thread-safe wrapper for the NAT-T rendezvous completion
+// dispatch. Always queues an event to wxTheApp (DoNotifyAlways) so
+// CClientList lookup + CUpDownClient state mutation run on the main
+// thread — the coordinator's callback may fire on UtpTimer's tick
+// thread, which is NOT main-thread-safe for theApp access.
+#define CoreNotify_NatTraversalComplete(hash, ok, layer)	MuleNotify::DoNotifyAlways(&MuleNotify::NatTraversalComplete, hash, ok, layer)
+#endif
 
 
 //

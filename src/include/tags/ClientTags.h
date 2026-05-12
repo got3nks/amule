@@ -48,7 +48,17 @@ enum client_tags {
 	CT_EMULE_BUDDYIP		= 0xFC,
 	CT_EMULE_BUDDYUDP		= 0xFD,
 	CT_EMULE_MISCOPTIONS2		= 0xFE,
-	CT_EMULE_RESERVED13		= 0xFF
+	CT_EMULE_RESERVED13		= 0xFF,
+
+	// eMuleAI extension — third bitfield of misc-option capability
+	// bits, carrying ExtendedXS / NAT-T / IPv6 / ServingBuddyPull
+	// support. Wire-compatible with eMuleAI's `CT_MOD_MISCOPTIONS`
+	// (`Opcodes.h:643`); same tag ID 0xAA, same bitfield layout
+	// (`UModMiscOptions` union). aMule decodes the NAT-T bit (bit 1)
+	// and ignores the rest for now — IPv6 + ServingBuddyPull are
+	// eMuleAI-specific features. Old eMule / aMule peers without
+	// this tag are treated as not supporting NAT-T.
+	CT_MOD_MISCOPTIONS		= 0xAA
 };
 
 // Old MuleInfo tags

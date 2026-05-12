@@ -87,6 +87,47 @@ inline bool DecodeFromConnectOptions(uint8_t options,
 	return (options & CONNECT_OPT_BIT_NAT_TRAVERSAL) != 0;
 }
 
+// --- Phase E4: CT_MOD_MISCOPTIONS bitfield (eMuleAI Hello tag) -------
+//
+// eMuleAI's Hello-time capability bitfield, sent as a CTagVarInt with
+// id CT_MOD_MISCOPTIONS = 0xAA. Wire-compatible with eMuleAI's
+// `UModMiscOptions` union (`eMuleAI/srchybrid/Opcodes.h:656`). We only
+// emit + consume the NAT-T bit; the other fields (ExtendedXS / IPv6 /
+// ServingBuddyPull) are eMuleAI-specific and we leave their wire
+// positions reserved so future aMule features can land without
+// colliding.
+//
+// Layout (low-bit-first; matches eMuleAI's struct-bitfield order):
+//   bit 0:  SupportsExtendedXS         (eMuleAI; not set by aMule)
+//   bit 1:  SupportsNatTraversal       <-- what we set/read
+//   bit 2:  SupportsIPv6               (eMuleAI; not set by aMule)
+//   bit 3:  SupportsServingBuddyPull   (eMuleAI; not set by aMule)
+//   bits 4-31: reserved
+//
+// Receiver behaviour: peers that don't send this tag (old eMule /
+// vanilla aMule) leave m_fSupportsNatTraversal=false, which gates
+// NAT-T attempts off — exactly the right default.
+static constexpr std::uint32_t MOD_MISCOPT_BIT_NAT_TRAVERSAL = 0x00000002;
+
+// Build the CT_MOD_MISCOPTIONS value to send. Only the NAT-T bit is
+// set today; future aMule features can OR in their own bits without
+// touching this function.
+inline std::uint32_t BuildModMiscOptionsForHello(bool supports_nat)
+{
+	std::uint32_t bits = 0;
+	if (supports_nat) {
+		bits |= MOD_MISCOPT_BIT_NAT_TRAVERSAL;
+	}
+	return bits;
+}
+
+// Decode whether the peer advertises NAT-T support from a received
+// CT_MOD_MISCOPTIONS bitfield.
+inline bool DecodeNatTraversalFromModMiscOptions(std::uint32_t bits)
+{
+	return (bits & MOD_MISCOPT_BIT_NAT_TRAVERSAL) != 0;
+}
+
 // Encode the NAT-T bit into a base connect-options byte.
 //
 //   base_options: the byte built from the other bits (crypt layer
