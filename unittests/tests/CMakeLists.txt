@@ -3,8 +3,6 @@ add_executable (CTagTest
 	${CMAKE_SOURCE_DIR}/src/SafeFile.cpp
 	${CMAKE_SOURCE_DIR}/src/MemFile.cpp
 	${CMAKE_SOURCE_DIR}/src/Tag.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 )
 
 add_test (NAME CTagTest
@@ -24,8 +22,6 @@ target_link_libraries (CTagTest
 add_executable (CUInt128Test
 	CUInt128Test.cpp
 	${CMAKE_SOURCE_DIR}/src/kademlia/utils/UInt128.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 )
 
 add_test (NAME CUInt128Test
@@ -48,8 +44,6 @@ add_executable (FileDataIOTest
 	${CMAKE_SOURCE_DIR}/src/kademlia/utils/UInt128.cpp
 	${CMAKE_SOURCE_DIR}/src/Tag.cpp
 	${CMAKE_SOURCE_DIR}/src/libs/common/Path.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 )
 
 add_test (NAME FileDataIOTest
@@ -68,8 +62,6 @@ target_link_libraries (FileDataIOTest
 
 add_executable (FormatTest
 	FormatTest.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 )
 
 add_test (NAME FormatTest
@@ -88,8 +80,6 @@ add_executable (NetworkFunctionsTest
 	NetworkFunctionsTest.cpp
 	${CMAKE_SOURCE_DIR}/src/NetworkFunctions.cpp
 	${CMAKE_SOURCE_DIR}/src/LibSocket.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 )
 
 add_test (NAME NetworkFunctionsTest
@@ -120,8 +110,6 @@ target_link_libraries (NetworkFunctionsTest
 
 add_executable (PathTest
 	PathTest.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 	${CMAKE_SOURCE_DIR}/src/libs/common/Path.cpp
 )
 
@@ -135,8 +123,6 @@ target_link_libraries (PathTest
 
 add_executable (RangeMapTest
 	RangeMapTest.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 )
 
 add_test (NAME RangeMapTest
@@ -153,8 +139,6 @@ target_link_libraries (RangeMapTest
 
 add_executable (StringFunctionsTest
 	StringFunctionsTest.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 	${CMAKE_SOURCE_DIR}/src/libs/common/Path.cpp
 )
 
@@ -168,8 +152,6 @@ target_link_libraries (StringFunctionsTest
 
 add_executable (TextFileTest
 	TextFileTest.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/Format.cpp
-	${CMAKE_SOURCE_DIR}/src/libs/common/strerror_r.c
 	${CMAKE_SOURCE_DIR}/src/libs/common/Path.cpp
 	${CMAKE_SOURCE_DIR}/src/libs/common/TextFile.cpp
 )
