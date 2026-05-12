@@ -64,7 +64,7 @@ constexpr int kDefaultReadBufferSize = 16 * 1024;
 // mutex. Long-running work belongs out-of-line via a posted event;
 // callbacks must return quickly.
 
-uint64_t on_state_change(utp_callback_arguments* a)
+uint64 on_state_change(utp_callback_arguments* a)
 {
 	// a->socket: the utp_socket whose state changed (may be NULL for
 	//            context-level events, defensively check).
@@ -85,7 +85,7 @@ uint64_t on_state_change(utp_callback_arguments* a)
 	return 0;
 }
 
-uint64_t on_read(utp_callback_arguments* a)
+uint64 on_read(utp_callback_arguments* a)
 {
 	// a->socket: source socket
 	// a->buf, a->len: payload bytes libutp has accumulated for us
@@ -107,7 +107,7 @@ uint64_t on_read(utp_callback_arguments* a)
 	return 0;
 }
 
-uint64_t on_sendto(utp_callback_arguments* a)
+uint64 on_sendto(utp_callback_arguments* a)
 {
 	// libutp gave us an outbound uTP packet, fully formed, ready for
 	// UDP transmission. Forward to whoever owns the UDP transport.
@@ -153,7 +153,7 @@ uint64_t on_sendto(utp_callback_arguments* a)
 	return 0;
 }
 
-uint64_t on_accept(utp_callback_arguments* a)
+uint64 on_accept(utp_callback_arguments* a)
 {
 	// libutp created a fresh utp_socket for an incoming SYN that
 	// didn't match any existing connection in the context. Phase B8:
@@ -179,7 +179,7 @@ uint64_t on_accept(utp_callback_arguments* a)
 	return 0;
 }
 
-uint64_t on_error(utp_callback_arguments* a)
+uint64 on_error(utp_callback_arguments* a)
 {
 	// a->socket: the connection that errored
 	// a->error_code: UTP_ECONNREFUSED / UTP_ECONNRESET / UTP_ETIMEDOUT
@@ -195,7 +195,7 @@ uint64_t on_error(utp_callback_arguments* a)
 	return 0;
 }
 
-uint64_t on_get_read_buffer_size(utp_callback_arguments* a)
+uint64 on_get_read_buffer_size(utp_callback_arguments* a)
 {
 	// libutp asks how much app-side buffer space remains for inbound
 	// data. Returning 0 would tell libutp to stall the sender (apply
