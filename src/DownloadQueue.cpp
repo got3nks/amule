@@ -1635,6 +1635,14 @@ void CDownloadQueue::KademliaSearchFile(uint32_t searchID, const Kademlia::CUInt
 			// This will be a firewalled client connected to Kad only.
 			// We set the clientID to 1 as a Kad user only has 1 buddy.
 			ctemp = new CUpDownClient(tcp, 1, 0, 0, temp, false, true);
+			// NAT-T (eMuleAI parity): set the LowID source's external IP
+			// so `CUpDownClient::GetConnectIP()` returns the actual
+			// address. `TryNatTraversal()` uses GetConnectIP as the
+			// post-HOLEPUNCH uTP target; the stock case-3 add leaves
+			// `m_nConnectIP=0` because pre-NAT-T LowID clients couldn't
+			// be reached directly. Mirrors eMuleAI's
+			// DownloadQueue.cpp:1806-1807 (`SetIP(addr); SetConnectIP(addr);`).
+			ctemp->SetIP(ED2KID);
 			// The only reason we set the real IP is for when we get a callback
 			// from this firewalled source, the compare method will match them.
 			ctemp->SetSourceFrom(SF_KADEMLIA);

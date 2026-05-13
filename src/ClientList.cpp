@@ -953,6 +953,14 @@ bool CClientList::IncomingBuddy(Kademlia::CContact* contact, Kademlia::CUInt128*
 	CUpDownClient* pNewClient = new CUpDownClient(contact->GetTCPPort(), contact->GetIPAddress(), 0, 0, NULL, false, true );
 	pNewClient->SetKadPort(contact->GetUDPPort());
 	pNewClient->SetKadState(KS_INCOMING_BUDDY);
+	// Seed the verified IP so AttachToAlreadyKnown can match this buddy
+	// candidate by IP when the buddy's TCP HELLO arrives. Without this,
+	// m_dwUserIP stays 0 and the inbound TCP client is created as a
+	// separate orphan that never links to the buddy slot; m_pBuddy then
+	// has no socket and rendezvous forwards fail. Mirrors eMuleAI's
+	// IncomingServedBuddy (ClientList.cpp:1589, "SetIP(addr); ... // Also
+	// set verified IP to allow AttachToAlreadyKnown to match on IP.").
+	pNewClient->SetIP(nContactIP);
 	uint8_t ID[16];
 	contact->GetClientID().ToByteArray(ID);
 	pNewClient->SetUserHash(CMD4Hash(ID));
@@ -1001,6 +1009,8 @@ bool CClientList::IncomingServedBuddy(Kademlia::CContact* contact,
 	                                              0, 0, NULL, false, true);
 	pNewClient->SetKadPort(contact->GetUDPPort());
 	pNewClient->SetKadState(KS_INCOMING_BUDDY);
+	// Same verified-IP seed as IncomingBuddy above — eMuleAI parity.
+	pNewClient->SetIP(nContactIP);
 	uint8_t ID[16];
 	contact->GetClientID().ToByteArray(ID);
 	pNewClient->SetUserHash(CMD4Hash(ID));

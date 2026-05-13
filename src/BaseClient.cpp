@@ -1552,6 +1552,22 @@ bool CUpDownClient::TryNatTraversal()
 		return false;
 	}
 
+	// Pre-rendezvous HOLEPUNCH burst (eMuleAI parity, BaseClient.cpp:2841-2867):
+	// from the requester to the target's external endpoint. Opens OUR NAT
+	// pinhole toward the target's IP+port so that the target's reverse
+	// HOLEPUNCH burst (the responder side, in NatTraversalCoordinator's
+	// ENDPOINT path) is accepted by our NAT rather than dropped as
+	// unsolicited. Critical for cone NAT and restricted NAT (every consumer
+	// router). Without it, the responder's inbound burst is dropped at our
+	// NAT before reaching amuled, and OnInboundHolePunch never matches.
+	for (int i = 0; i < 6; ++i) {
+		CPacket* hp = new CPacket(NatTraversal::OP_HOLEPUNCH_OPCODE, 0, OP_EMULEPROT);
+		theStats::AddUpOverheadFileRequest(hp->GetPacketSize());
+		theApp->clientudp->SendPacket(hp, peer_ip, peer_port,
+			/*bEncrypt=*/false, /*pachTargetClientHashORKadID=*/nullptr,
+			/*bKad=*/false, /*nReceiverVerifyKey=*/0);
+	}
+
 	// Wrap in OP_EMULEPROT + OP_REASKCALLBACKUDP, send to target's buddy.
 	CMemFile mem;
 	mem.Write(body.data(), body.size());
@@ -1573,7 +1589,11 @@ bool CUpDownClient::TryNatTraversal()
 	sockaddr_in target_addr;
 	std::memset(&target_addr, 0, sizeof(target_addr));
 	target_addr.sin_family      = AF_INET;
-	target_addr.sin_addr.s_addr = peer_ip;
+	// htonl(peer_ip): GetConnectIP() returns host byte order; sin_addr.s_addr
+	// is network byte order. Without the swap, RegisterPendingRendezvous's
+	// internal ntohl flips it back to a byte-swapped match key that never
+	// matches the inbound HOLEPUNCH src_ip_host (also host order).
+	target_addr.sin_addr.s_addr = htonl(peer_ip);
 	target_addr.sin_port        = htons(peer_port);
 	NatTraversal::CNatTraversalCoordinator::Instance().RegisterPendingRendezvous(
 		target_hash.GetHash(),

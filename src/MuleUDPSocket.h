@@ -137,7 +137,6 @@ protected:
 	/** See ThrottledControlSocket::SendControlData */
 	SocketSentBytes  SendControlData(uint32 maxNumberOfBytesToSend, uint32 minFragSize);
 
-private:
 	/**
 	 * Sends a packet to the specified address.
 	 *
@@ -145,10 +144,17 @@ private:
 	 * @param length the length of the data buffer.
 	 * @param ip The target ip address.
 	 * @param port The target port.
+	 *
+	 * Visibility lifted from private to protected (B7.6) so
+	 * CClientUDPSocket can expose a raw-UDP entry point to the NAT-T /
+	 * uTP production sendto delegate. uTP envelopes arrive already
+	 * encrypted by WrapKeyFrame / WrapUtpFrame, so they bypass
+	 * SendPacket's per-peer encryption queue and go straight to the
+	 * wire.
 	 */
 	bool	SendTo(uint8_t *buffer, uint32_t length, uint32_t ip, uint16_t port);
 
-
+private:
 	/**
 	 * Creates a new socket.
 	 *

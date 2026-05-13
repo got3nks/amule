@@ -56,6 +56,8 @@ typedef unsigned int socklen_t;
 struct struct_utp_context;
 typedef struct struct_utp_context utp_context;
 
+class CClientUDPSocket;
+
 namespace UtpCallbacks {
 
 // Function-pointer signature for the sendto delegate. libutp gives us
@@ -87,6 +89,16 @@ bool InstallOnContext(utp_context* ctx);
 // either both non-NULL or both NULL — passing a non-NULL function with
 // a NULL userdata is fine if the function doesn't dereference it.
 void SetSendtoDelegate(SendtoFn fn, void* userdata);
+
+// Install the production sendto delegate, which forwards already-
+// wrapped uTP envelopes ([0xB2, sub-byte, ciphertext]) through
+// CMuleUDPSocket::SendTo — the same raw-UDP path the rest of the eD2k
+// UDP stack uses. Called once from CClientUDPSocket's ctor next to
+// UtpEncryption::InstallProductionDelegates, so the delegate is ready
+// before any uTP traffic could fire. Lives in UtpCallbacksProduction.cpp
+// so the unit-test target can link UtpCallbacks.cpp without pulling in
+// CClientUDPSocket / theApp.
+void InstallProductionSendtoDelegate(::CClientUDPSocket* sock);
 
 // Forward a raw UDP packet through the registered sendto delegate.
 // Used by Phase B6's CUtpLayer::Connect to push the Key Frame

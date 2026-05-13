@@ -48,6 +48,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		NatTraversalCoordinator.cpp
 		NatTraversalCoordinatorProduction.cpp
 		UtpCallbacks.cpp
+		UtpCallbacksProduction.cpp
 		UtpEncryption.cpp
 		UtpEncryptionProduction.cpp
 		UtpEnvironment.cpp

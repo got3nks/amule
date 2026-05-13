@@ -26,6 +26,8 @@
 #ifndef CLIENTUDPSOCKET_H
 #define CLIENTUDPSOCKET_H
 
+#include "config.h"		// ENABLE_NAT_T (B7.6: needed for SendNatTraversalRaw decl)
+
 #include "MuleUDPSocket.h"
 
 class CClientUDPSocket : public CMuleUDPSocket
@@ -33,6 +35,21 @@ class CClientUDPSocket : public CMuleUDPSocket
 public:
 	CClientUDPSocket(const amuleIPV4Address &address, const CProxyData *ProxyData = NULL);
 	~CClientUDPSocket() override;
+
+#ifdef ENABLE_NAT_T
+	/**
+	 * Send an already-wrapped NAT-T / uTP envelope ([0xB2, sub-byte,
+	 * ciphertext] from UtpEncryption::WrapKeyFrame or WrapUtpFrame) as
+	 * a single raw UDP datagram. Used by UtpCallbacks's production
+	 * sendto delegate (UtpCallbacksProduction.cpp) so libutp's
+	 * on_sendto and CUtpLayer::Connect's Key Frame send can put bytes
+	 * on the wire without going through SendPacket's per-peer
+	 * encryption queue (which would double-encrypt the already-wrapped
+	 * envelope). Equivalent to eMuleAI's
+	 * CClientUDPSocket::SendUtpPacket (srchybrid/ClientUDPSocket.cpp).
+	 */
+	void	SendNatTraversalRaw(const uint8_t* buf, uint32_t length, uint32_t ip, uint16_t port);
+#endif
 
 protected:
 	void	OnReceive(int errorCode) override;

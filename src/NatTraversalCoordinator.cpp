@@ -352,6 +352,24 @@ void CNatTraversalCoordinator::OnInboundRendezvous(
 	// Factory owns the layer from here. Returning NULL on factory
 	// failure is acceptable — same drop behavior as an unknown
 	// requester.
+
+	// After registering the passive uTP layer, send a burst of
+	// OP_HOLEPUNCH packets to the requester's external endpoint
+	// (eMuleAI parity, ClientUDPSocket.cpp:1357-1383). Serves two
+	// purposes:
+	//   (a) opens this node's NAT pinhole toward the requester so the
+	//       requester's incoming uTP SYN is accepted;
+	//   (b) signals the requester's CNatTraversalCoordinator that the
+	//       rendezvous relay completed, so its OnInboundHolePunch path
+	//       fires the outbound uTP connect.
+	// eMuleAI sends 12 packets plus a sweep window for symmetric NAT;
+	// the sweep is deferred to Phase E7.
+	if (m_send_emule_prot != nullptr) {
+		for (int i = 0; i < 12; ++i) {
+			m_send_emule_prot(OP_HOLEPUNCH_OPCODE, nullptr, 0,
+				req.requester_ext_ip, req.requester_ext_port);
+		}
+	}
 }
 
 void CNatTraversalCoordinator::OnInboundHolePunch(

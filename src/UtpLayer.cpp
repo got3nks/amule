@@ -83,21 +83,24 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 		return false;
 	}
 
-	// Build the encrypted Key Frame envelope keyed on the peer's
-	// user hash. WrapKeyFrame returns false if no encrypt delegate
-	// is installed — that's a hard "encryption mandatory" guarantee,
-	// so propagate the failure without changing state.
-	std::vector<std::uint8_t> key_frame;
-	if (!UtpEncryption::WrapKeyFrame(our_hash, peer_hash, key_frame)) {
-		return false;
-	}
-
-	// Push the envelope onto the wire via the same UDP transport
-	// libutp uses for its sub-byte-0x00 frames. False here means no
-	// sendto delegate is installed yet — failed precondition.
-	if (!UtpCallbacks::SendRaw(key_frame.data(), key_frame.size(),
-	                           peer_addr, addr_len)) {
-		return false;
+	// Only the initiator sends a Key Frame on Connect — paired with
+	// libutp's ST_SYN. The endpoint's Connect just registers the layer
+	// so the inbound Key Frame from the initiator can be dispatched.
+	// If the endpoint also sent a Key Frame, it would race with the
+	// HOLEPUNCH burst the responder fires: the initiator could receive
+	// the endpoint's Key Frame BEFORE its own OnInboundHolePunch match
+	// has created its CUtpLayer, and drop it as "no layer registered."
+	// eMuleAI emits the Key Frame only from CClientUDPSocket::SendUtpPacket
+	// when packet type == 4 (ST_SYN), which only the initiator sends.
+	if (initiator) {
+		std::vector<std::uint8_t> key_frame;
+		if (!UtpEncryption::WrapKeyFrame(our_hash, peer_hash, key_frame)) {
+			return false;
+		}
+		if (!UtpCallbacks::SendRaw(key_frame.data(), key_frame.size(),
+		                           peer_addr, addr_len)) {
+			return false;
+		}
 	}
 
 	// Record hashes + address for use in OnPeerKeyFrame, then enter
@@ -122,6 +125,35 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 	// utp_get_userdata). The dtor unregisters both before freeing
 	// layer state.
 	UtpLayerRegistry::Register(m_peer_hash, this, peer_addr, addr_len);
+
+	// Initiator: fire utp_connect immediately, don't wait for the
+	// endpoint's Key Frame (the endpoint doesn't send one — see above).
+	// Matches eMuleAI's flow: the endpoint just registers a passive
+	// uTP socket and the initiator's SYN drives the handshake. The
+	// Key Frame went out a few lines above (the `if (initiator)`
+	// Key-Frame block); the SYN goes out now via utp_connect →
+	// libutp → on_sendto.
+	if (initiator) {
+		if (m_ctx != NULL) {
+			m_socket = utp_create_socket(m_ctx);
+			if (m_socket != NULL) {
+				utp_set_userdata(m_socket, this);
+				int rc = utp_connect(m_socket,
+					reinterpret_cast<const struct sockaddr*>(m_peer_addr.data()),
+					m_peer_addr_len);
+				if (rc == 0) {
+					m_state = State::UTP_CONNECTING;
+				} else {
+					TeardownSocketLocked();
+					m_state = State::FAILED;
+				}
+			} else {
+				m_state = State::FAILED;
+			}
+		} else {
+			m_state = State::FAILED;
+		}
+	}
 
 	return true;
 }

@@ -53,6 +53,7 @@
 #include "NatTraversal.h"
 #ifdef ENABLE_NAT_T
 #include "NatTraversalCoordinator.h"
+#include "UtpCallbacks.h"
 #include "UtpEncryption.h"
 #include "UtpEnvironment.h"
 #include "UtpKeyFrame.h"
@@ -99,6 +100,17 @@ CClientUDPSocket::CClientUDPSocket(const amuleIPV4Address& address, const CProxy
 	// process) just re-overwrites the delegate pointers.
 	UtpEncryption::InstallProductionDelegates();
 
+	// Phase B7.6: wire the sendto thunk so libutp's on_sendto and
+	// CUtpLayer::Connect's SendRaw can put already-wrapped uTP
+	// envelopes ([0xB2, sub-byte, ciphertext]) on the wire through
+	// CMuleUDPSocket::SendTo. Until this is installed, SendRaw
+	// returns false and CUtpLayer::Connect bails before its first
+	// real packet; the symptom is "NAT-T rendezvous failed" even when
+	// the control plane validates fine. eMuleAI does the equivalent
+	// wiring inline (CClientUDPSocket::SendUtpPacket invoked from
+	// utp_set_callback(UTP_SENDTO, &on_utp_sendto)).
+	UtpCallbacks::InstallProductionSendtoDelegate(this);
+
 	// Phase B7: start the periodic libutp tick driver. The worker
 	// thread fires every 50 ms, locks UtpEnvironment::RuntimeLock,
 	// and runs utp_check_timeouts + utp_issue_deferred_acks against
@@ -133,6 +145,20 @@ CClientUDPSocket::~CClientUDPSocket()
 	UtpEnvironment::Shutdown();
 #endif
 }
+
+
+#ifdef ENABLE_NAT_T
+void CClientUDPSocket::SendNatTraversalRaw(const uint8_t* buf, uint32_t length, uint32_t ip, uint16_t port)
+{
+	// CMuleUDPSocket::SendTo's signature is non-const for the buffer
+	// pointer (the eD2k UDP path mutates the buffer for encryption);
+	// our NAT-T envelope is already final-form (WrapKeyFrame /
+	// WrapUtpFrame produced [0xB2, sub-byte, ciphertext]), so we just
+	// need to push the bytes — the underlying boost::asio SendTo only
+	// reads. The const_cast is the cheapest way to bridge the two.
+	SendTo(const_cast<uint8_t*>(buf), length, ip, port);
+}
+#endif
 
 
 void CClientUDPSocket::OnReceive(int errorCode)
@@ -350,6 +376,16 @@ void CClientUDPSocket::ProcessPacket(uint8_t* packet, int16 size, int8 opcode, u
 			AddDebugLogLineN( logClientUDP, "Client UDP socket: send OP_REASKCALLBACKTCP" );
 			theStats::AddUpOverheadFileRequest(response->GetPacketSize());
 			forward_target->GetSocket()->SendPacket(response);
+#ifdef ENABLE_NAT_T
+			// After forwarding the rendezvous over TCP to the served-buddy
+			// target, send a UDP OP_HOLEPUNCH back to the requester so its
+			// CNatTraversalCoordinator::OnInboundHolePunch fires and the
+			// outbound uTP connect is dispatched. eMuleAI's BUDDY role
+			// does this; aMule's original handler was missing it.
+			CPacket* hp = new CPacket(NatTraversal::OP_HOLEPUNCH_OPCODE, 0, OP_EMULEPROT);
+			theStats::AddUpOverheadFileRequest(hp->GetPacketSize());
+			theApp->clientudp->SendPacket(hp, host, port, false, NULL, false, 0);
+#endif
 			break;
 		}
 		case OP_REASKFILEPING: {
@@ -531,14 +567,14 @@ void CClientUDPSocket::ProcessPacket(uint8_t* packet, int16 size, int8 opcode, u
 			break;
 		}
 		case NatTraversal::OP_HOLEPUNCH_OPCODE: {
-			// HOLEPUNCH carries no body — the source address is the
-			// signal. Phase D will use it to drive the symmetric-NAT
-			// hole-punch retry; here we just log + count.
+			// HOLEPUNCH from buddy is the relay-succeeded signal: route
+			// to the requester-side D3 coordinator which finds the
+			// matching pending entry and fires create_utp_layer
+			// (initiator=true). Wires the previously-stubbed Phase D3
+			// receive path.
 			theStats::AddDownOverheadOther(size);
-			AddDebugLogLineN(logClientUDP, CFormat(
-				"NAT-T: received OP_HOLEPUNCH from %s (size=%d) — "
-				"Phase D handler not wired yet")
-				% Uint32_16toStringIP_Port(host, port) % size);
+			NatTraversal::CNatTraversalCoordinator::Instance()
+				.OnInboundHolePunch(host, port);
 			break;
 		}
 #endif // ENABLE_NAT_T
