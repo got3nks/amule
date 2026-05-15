@@ -293,6 +293,15 @@ private:
 	// utp_close). Caller holds RuntimeLock. Idempotent.
 	void TeardownSocketLocked();
 
+	// Apply libutp-level socket-buffer tuning (UTP_RCVBUF / UTP_SNDBUF)
+	// to m_socket right after it's created or accepted. Caller holds
+	// RuntimeLock. Sized to support sustained NAT-T uTP transfers
+	// without the per-connection send/receive window throttling
+	// throughput — libutp's defaults are small for the connection-flooded
+	// BitTorrent case but we typically have only a handful of NAT-T
+	// peers, so a generous per-connection allocation is fine.
+	void ApplySocketBuffersLocked();
+
 	utp_context* m_ctx;            // borrowed, not owned
 	utp_socket*  m_socket;         // owned by libutp; we hold a ref
 

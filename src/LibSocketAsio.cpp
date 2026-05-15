@@ -114,6 +114,21 @@ static void EnsureUdpThreadStarted()
 	});
 }
 
+// Actual kernel-allocated SO_RCVBUF (in bytes) on the most-recently-created
+// UDP socket. Published by CAsioUDPSocketImpl::CreateSocket so other code
+// — specifically CUtpLayer::ApplySocketBuffersLocked — can size its
+// per-connection libutp receive window to fit the kernel buffer instead
+// of advertising a window the kernel can't actually back. Linux silently
+// caps SO_RCVBUF at net.core.rmem_max, and getsockopt returns the
+// effective allocation (typically 2× the requested value, the kernel
+// uses half for metadata). Zero means "no UDP socket created yet" — in
+// that case callers should fall back to a sensible default.
+static std::atomic<std::size_t> s_udp_actual_rcvbuf{0};
+std::size_t GetUdpKernelRecvBufferBytes()
+{
+	return s_udp_actual_rcvbuf.load(std::memory_order_relaxed);
+}
+
 //
 // Mark a freshly-created socket close-on-exec so subprocesses launched
 // via wxExecute() (preview-with-vlc, etc.) don't inherit and pin our
@@ -1366,14 +1381,46 @@ private:
 	// Completion handlers for async requests
 	//
 
+	// Copy one received datagram into a CUDPData and push it on the
+	// worker queue. Returns true if pushed, false if the queue was full
+	// (drop with stats counter). Used by both the asio async completion
+	// (HandleRead) and the tight drain loop that follows it.
+	bool EnqueueOneReceived(const char* data, size_t len, const amuleIPV4Address & ipadr)
+	{
+		CUDPData * recdata = new CUDPData(data, static_cast<uint32>(len), ipadr);
+		bool pushed = false;
+		{
+			std::lock_guard<std::mutex> lk(m_workerQueueMutex);
+			if (m_workerQueue.size() < kMaxWorkerQueueDepth) {
+				m_workerQueue.push(recdata);
+				pushed = true;
+			}
+		}
+		if (pushed) {
+			m_workerQueueCV.notify_one();
+		} else {
+			delete recdata;
+			++m_workerDrops;
+			if ((m_workerDrops & 0xFF) == 1) {
+				AddLogLineNS(CFormat("UDP worker queue full — dropped %u packets cumulative")
+					% m_workerDrops.load());
+			}
+		}
+		return pushed;
+	}
+
 	void HandleRead(const error_code & ec, size_t received)
 	{
 		// Design B producer side: this runs on the dedicated UDP asio
-		// thread. We do the MINIMUM work to get the packet off the
+		// thread. We do the MINIMUM work to get each packet off the
 		// kernel buffer (copy into a CUDPData, push to the worker
-		// queue) and immediately restart async_receive_from so the
-		// kernel keeps draining at line rate. The worker thread
-		// (WorkerLoop below) does the actual decode + dispatch.
+		// queue), then drain any remaining buffered datagrams via a
+		// non-blocking receive_from loop before restarting the async
+		// op. This mimics libtorrent's recvmmsg-style "drain everything
+		// available in one wake" pattern: fewer asio round-trips,
+		// fewer epoll wake-ups, and the kernel UDP buffer empties
+		// faster which is critical when net.core.rmem_max is small
+		// (208 KiB on stock Linux).
 		if (ec) {
 			AddDebugLogLineN(logAsio, CFormat("UDP HandleReadError %s") % ec.message());
 		} else if (received == 0) {
@@ -1381,27 +1428,29 @@ private:
 		} else if (m_muleSocket == NULL) {
 			AddDebugLogLineN(logAsio, "UDP HandleReadError no handler");
 		} else {
+			// The completed async_receive_from is the first datagram.
 			amuleIPV4Address ipadr = amuleIPV4Address(CamuleIPV4Endpoint(m_receiveEndpoint));
-			CUDPData * recdata = new CUDPData(m_readBuffer, received, ipadr);
-			bool pushed = false;
-			{
-				std::lock_guard<std::mutex> lk(m_workerQueueMutex);
-				if (m_workerQueue.size() < kMaxWorkerQueueDepth) {
-					m_workerQueue.push(recdata);
-					pushed = true;
+			EnqueueOneReceived(m_readBuffer, received, ipadr);
+
+			// Drain any additional datagrams the kernel buffered while
+			// we were processing the first one. m_socket is in
+			// non-blocking mode (set in CreateSocket), so receive_from
+			// returns immediately with boost::asio::error::would_block
+			// when the kernel buffer is empty.
+			for (;;) {
+				error_code drain_ec;
+				ip::udp::endpoint sender;
+				const size_t n = m_socket->receive_from(
+					buffer(m_readBuffer, CMuleUDPSocket::UDP_BUFFER_SIZE),
+					sender, 0, drain_ec);
+				if (drain_ec || n == 0) {
+					// would_block (kernel buffer empty) or any real
+					// error: stop draining, re-arm the async op below
+					// to wait for the next wake-up.
+					break;
 				}
-			}
-			if (pushed) {
-				m_workerQueueCV.notify_one();
-			} else {
-				delete recdata;
-				++m_workerDrops;
-				// Log at most occasionally so a sustained overflow
-				// doesn't spam the log. The counter is the real metric.
-				if ((m_workerDrops & 0xFF) == 1) {
-					AddLogLineNS(CFormat("UDP worker queue full — dropped %u packets cumulative")
-						% m_workerDrops.load());
-				}
+				amuleIPV4Address drain_ipadr = amuleIPV4Address(CamuleIPV4Endpoint(sender));
+				EnqueueOneReceived(m_readBuffer, n, drain_ipadr);
 			}
 		}
 		StartBackgroundRead();
@@ -1492,6 +1541,46 @@ private:
 			m_socket->open(endpoint.protocol());
 			SetCloexecOnSocket(m_socket->native_handle());
 			m_socket->bind(endpoint);
+
+			// Request a 4 MiB UDP receive buffer. Linux will silently
+			// cap this at net.core.rmem_max (default 208 KiB on stock
+			// distros); the actual granted size is reported below so an
+			// operator can spot when sysctl tuning is needed. This is
+			// the same mitigation libtorrent / qBittorrent ship — the
+			// kernel-side cap is a power-user knob we can only
+			// recommend, not enforce. Documented at:
+			//   sudo sysctl -w net.core.rmem_max=4194304
+			//   sudo sysctl -w net.core.rmem_default=4194304
+			// (persist in /etc/sysctl.d/30-amule.conf if desired).
+			boost::system::error_code rcv_ec;
+			m_socket->set_option(socket_base::receive_buffer_size(4 * 1024 * 1024), rcv_ec);
+			socket_base::receive_buffer_size actual_rcv;
+			m_socket->get_option(actual_rcv, rcv_ec);
+			// Publish the actual kernel allocation so CUtpLayer can size
+			// its per-connection libutp UTP_RCVBUF to match — advertising
+			// a window the kernel can't back is the exact symptom that
+			// causes LEDBAT CWND collapse + stall (peer over-sends,
+			// kernel drops, libutp interprets as congestion).
+			if (actual_rcv.value() > 0) {
+				s_udp_actual_rcvbuf.store(
+					static_cast<std::size_t>(actual_rcv.value()),
+					std::memory_order_relaxed);
+			}
+			AddLogLineN(
+				CFormat(_("UDP receive buffer: requested 4 MiB, kernel granted %d bytes "
+				          "(%s). For sustained NAT-T uTP transfers on Linux consider "
+				          "raising net.core.rmem_max."))
+				% actual_rcv.value() % rcv_ec.message());
+
+			// Put the socket into non-blocking mode so HandleRead can
+			// follow up the async_receive_from completion with a tight
+			// drain loop (synchronous receive_from calls that return
+			// would_block when the kernel buffer is empty). This mimics
+			// libtorrent's recvmmsg-style "drain everything available"
+			// pattern in one wake-up: fewer asio dispatches, fewer
+	         // per-packet syscalls amortising into per-burst.
+			m_socket->non_blocking(true);
+
 			AddDebugLogLineN(logAsio, CFormat("Created UDP socket %s %d") % m_address.IPAddress() % m_address.Service());
 			StartBackgroundRead();
 		} catch (const system_error& err) {

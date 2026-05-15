@@ -33,6 +33,13 @@
 #include <cstring>
 #include <mutex>
 
+// Defined in LibSocketAsio.cpp. Reports the most-recently-observed
+// kernel-allocated SO_RCVBUF (bytes) on the UDP socket. Used here to
+// size libutp's per-connection UTP_RCVBUF so we don't advertise a
+// receive window the kernel can't actually back. Returns 0 if no UDP
+// socket has been created yet.
+std::size_t GetUdpKernelRecvBufferBytes();
+
 // Out-of-class definitions for the constexpr static members.
 // Required pre-C++17 when these are ODR-used (e.g. binding to a
 // reference through ASSERT_EQUALS). C++17 makes static constexpr
@@ -139,6 +146,7 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 			m_socket = utp_create_socket(m_ctx);
 			if (m_socket != NULL) {
 				utp_set_userdata(m_socket, this);
+				ApplySocketBuffersLocked();
 				int rc = utp_connect(m_socket,
 					reinterpret_cast<const struct sockaddr*>(m_peer_addr.data()),
 					m_peer_addr_len);
@@ -200,6 +208,7 @@ bool CUtpLayer::OnPeerKeyFrame(const std::uint8_t sender_hash[kUserHashSize])
 		return true;
 	}
 	utp_set_userdata(m_socket, this);
+	ApplySocketBuffersLocked();
 
 	const struct sockaddr* peer = reinterpret_cast<const struct sockaddr*>(
 		m_peer_addr.data());
@@ -234,6 +243,7 @@ void CUtpLayer::OnUtpAccept(utp_socket* accepted_socket)
 
 	m_socket = accepted_socket;
 	utp_set_userdata(m_socket, this);
+	ApplySocketBuffersLocked();
 
 	// libutp does NOT fire UTP_STATE_CONNECT on the responder side —
 	// that callback is gated on CS_SYN_SENT → CS_CONNECTED, which
@@ -572,6 +582,44 @@ void CUtpLayer::TeardownSocketLocked()
 		utp_close(m_socket);
 		m_socket = NULL;
 	}
+}
+
+void CUtpLayer::ApplySocketBuffersLocked()
+{
+	// Size libutp's per-connection UTP_RCVBUF to actually fit in the
+	// kernel UDP buffer. Over-advertising — telling the peer "you can
+	// have 4 MiB in flight" when the kernel SO_RCVBUF is only ~208 KiB
+	// — was the root cause of the LEDBAT-driven CWND collapse observed
+	// in the 1 GiB soak: peer sends more than the kernel can hold,
+	// kernel silently drops, libutp sees missing ACKs as queueing
+	// delay (ours_ms=~6500ms), shrinks CWND to zero permanently.
+	//
+	// The adaptive policy here is the same libtorrent uses: read back
+	// what the kernel actually gave us via getsockopt (published by
+	// CAsioUDPSocketImpl::CreateSocket as a static atomic), and use
+	// that as UTP_RCVBUF up to a 4 MiB ceiling. On stock Linux this
+	// is ~208 KiB; on a sysctl-tuned system this scales up to 4 MiB
+	// to lift the per-connection CWND ceiling.
+	//
+	// UTP_SNDBUF stays generous (4 MiB) — there's no kernel-side cap
+	// on UDP send buffering that would equivalently bite us, and the
+	// app-level write queue is bounded by kWriteBufferCapacity anyway.
+	if (m_socket == NULL) {
+		return;
+	}
+	constexpr std::size_t kUtpSendBufferBytes = 4 * 1024 * 1024;
+	constexpr std::size_t kUtpRecvBufferCeiling = 4 * 1024 * 1024;
+	constexpr std::size_t kUtpRecvBufferFloor = 64 * 1024;
+	const std::size_t kernel_rcvbuf = GetUdpKernelRecvBufferBytes();
+	std::size_t utp_rcvbuf = kernel_rcvbuf;
+	if (utp_rcvbuf == 0 || utp_rcvbuf < kUtpRecvBufferFloor) {
+		utp_rcvbuf = kUtpRecvBufferFloor;
+	}
+	if (utp_rcvbuf > kUtpRecvBufferCeiling) {
+		utp_rcvbuf = kUtpRecvBufferCeiling;
+	}
+	utp_setsockopt(m_socket, UTP_RCVBUF, static_cast<int>(utp_rcvbuf));
+	utp_setsockopt(m_socket, UTP_SNDBUF, static_cast<int>(kUtpSendBufferBytes));
 }
 
 #endif // ENABLE_NAT_T
