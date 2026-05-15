@@ -1024,6 +1024,25 @@ void CUpDownClient::ProcessBlockPacket(const uint8_t* packet, uint32 size, bool 
 				if (lenWritten > 0) {
 					m_nTransferredDown += lenWritten;
 
+#ifdef PHASE_F_DEBUG_PROBES
+					// Track partial-vs-complete block deliveries so we can
+					// see whether SendBlockRequests is being throttled by
+					// blocks never reaching their EndOffset.
+					if (nEndPos != cur_block->block->EndOffset) {
+						AddDebugLogLineN(logClient,
+							wxString::Format(
+								wxT("PHASE_F_DEBUG: ProcessBlockPacket PARTIAL nEndPos=%llu blockEnd=%llu remaining=%llu"),
+								static_cast<unsigned long long>(nEndPos),
+								static_cast<unsigned long long>(cur_block->block->EndOffset),
+								static_cast<unsigned long long>(cur_block->block->EndOffset - nEndPos)));
+					} else {
+						AddDebugLogLineN(logClient,
+							wxString::Format(
+								wxT("PHASE_F_DEBUG: ProcessBlockPacket BLOCK_DONE blockEnd=%llu — calling SendBlockRequests"),
+								static_cast<unsigned long long>(cur_block->block->EndOffset)));
+					}
+#endif
+
 					// If finished reserved block
 					if (nEndPos == cur_block->block->EndOffset) {
 

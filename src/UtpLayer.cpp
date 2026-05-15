@@ -315,6 +315,12 @@ std::int64_t CUtpLayer::Send(const void* buf, std::size_t count)
 	const std::size_t available = kWriteBufferCapacity - m_writeBuf.size();
 	const std::size_t to_buffer = std::min(count, available);
 	if (to_buffer == 0) {
+#ifdef PHASE_F_DEBUG_PROBES
+		AddDebugLogLineN(logClient,
+			wxString::Format(
+				wxT("PHASE_F_DEBUG: UtpLayer::Send writeBuf-full want=%zu writeBuf=%zu/%zu m_writable=%d"),
+				count, m_writeBuf.size(), kWriteBufferCapacity, m_writable ? 1 : 0));
+#endif
 		return 0;
 	}
 
@@ -473,6 +479,12 @@ void CUtpLayer::OnStateChange(int new_state)
 			    m_state == State::INIT) {
 				m_state = State::CONNECTED;
 			}
+#ifdef PHASE_F_DEBUG_PROBES
+			AddDebugLogLineN(logClient,
+				wxString::Format(
+					wxT("PHASE_F_DEBUG: UtpLayer::OnStateChange WRITABLE state=%d writeBuf=%zu m_writable_before=%d"),
+					static_cast<int>(m_state), m_writeBuf.size(), m_writable ? 1 : 0));
+#endif
 			m_writable = true;
 			DrainWriteBufferLocked();
 			break;
@@ -595,6 +607,12 @@ void CUtpLayer::DrainWriteBufferLocked()
 		                                m_writeBuf.data(),
 		                                m_writeBuf.size());
 		if (wrote <= 0) {
+#ifdef PHASE_F_DEBUG_PROBES
+			AddDebugLogLineN(logClient,
+				wxString::Format(
+					wxT("PHASE_F_DEBUG: UtpLayer::DrainWriteBufferLocked clamped m_writable=false utp_write=%zd writeBuf=%zu"),
+					static_cast<std::ptrdiff_t>(wrote), m_writeBuf.size()));
+#endif
 			// libutp's CWND is full or it refused. Mark non-writable;
 			// the next UTP_STATE_WRITABLE callback retries the drain.
 			m_writable = false;
