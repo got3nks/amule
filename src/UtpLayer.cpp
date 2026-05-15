@@ -550,7 +550,18 @@ void CUtpLayer::OnError(int /*error_code*/)
 std::size_t CUtpLayer::OnGetReadBufferSize() const
 {
 	// Lock NOT acquired here — caller (libutp via UtpCallbacks) holds it.
-	return kReadBufferCapacity - m_readBuf.size();
+	//
+	// libutp's UTP_GET_READ_BUFFER_SIZE contract is "bytes already in the
+	// application's receive buffer", NOT "free space remaining". libutp
+	// then computes the advertised receive window as
+	//   max(0, opt_rcvbuf - returned_value)
+	// at utp_internal.cpp:595. Returning free space flips the semantic
+	// and — once the soft cap kReadBufferCapacity is exceeded by in-flight
+	// bytes after OnRead's always-copy fix — underflows size_t to a huge
+	// value, which libutp's assert((int)numbuf >= 0) at line 594 catches
+	// with a SIGABRT. Returning the bytes-in-buffer count is what libutp
+	// expects and keeps the flow-control loop intact.
+	return m_readBuf.size();
 }
 
 void CUtpLayer::DrainWriteBufferLocked()
