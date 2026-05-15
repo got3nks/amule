@@ -33,6 +33,11 @@
 #include <cstring>
 #include <mutex>
 
+#ifdef PHASE_F_DEBUG_PROBES
+#include "Logger.h"
+#include <wx/string.h>
+#endif
+
 // Adaptive sizing of libutp's UTP_RCVBUF based on the kernel-allocated
 // SO_RCVBUF on aMule's UDP socket. The producer side
 // (CAsioUDPSocketImpl::CreateSocket) publishes the value to
@@ -520,6 +525,21 @@ void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 	// by that in-flight delta — sized at 2× EMBLOCKSIZE precisely to
 	// absorb it.
 	m_readBuf.insert(m_readBuf.end(), data, data + len);
+
+#ifdef PHASE_F_DEBUG_PROBES
+	// Soft-cap exceeded: libutp delivered in-flight bytes after we
+	// advertised window=0 via OnGetReadBufferSize. With the fix in
+	// place (always-copy + bigger cap) this is non-fatal — buffer
+	// just temporarily exceeds the cap. Useful to see how much
+	// in-flight slack we actually need in practice.
+	if (m_readBuf.size() > kReadBufferCapacity) {
+		AddDebugLogLineN(logClient,
+			wxString::Format(
+				wxT("PHASE_F_DEBUG: UtpLayer::OnRead soft-cap exceeded len=%zu m_readBuf=%zu/%zu overshoot=%zu"),
+				len, m_readBuf.size(), kReadBufferCapacity,
+				m_readBuf.size() - kReadBufferCapacity));
+	}
+#endif
 
 	if (m_socket != NULL) {
 		utp_read_drained(m_socket);

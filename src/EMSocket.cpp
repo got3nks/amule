@@ -214,6 +214,15 @@ void CEMSocket::OnReceive(int nErrorCode)
 			pendingPacketSize = 0;
 			readMax = CPacket::GetPacketSizeFromHeader(pendingHeader);
 			if (readMax > MAX_PACKET_SIZE) {
+#ifdef PHASE_F_DEBUG_PROBES
+				AddDebugLogLineN(logClient,
+					wxString::Format(
+						wxT("PHASE_F_DEBUG: EMSocket::OnReceive ERR_TOOBIG readMax=%u hdr=%02x %02x %02x %02x %02x %02x"),
+						readMax,
+						pendingHeader[0], pendingHeader[1],
+						pendingHeader[2], pendingHeader[3],
+						pendingHeader[4], pendingHeader[5]));
+#endif
 				pendingHeaderSize = 0;
 				OnError(ERR_TOOBIG);
 				return;
