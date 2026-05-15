@@ -1009,9 +1009,17 @@ void CKademliaUDPListener::Process2PublishKeyRequest(const uint8_t *packetData, 
 	CUInt128 distance(CKademlia::GetPrefs()->GetKadID());
 	distance ^= file;
 
+#ifndef PHASE_F_BUDDY
 	if (distance.Get32BitChunk(0) > SEARCHTOLERANCE && !::IsLanIP(wxUINT32_SWAP_ALWAYS(ip))) {
 		return;
 	}
+#else
+	// Phase F test-mesh: the buddy is far from random hashes by XOR so the
+	// production SEARCHTOLERANCE check rejects every publish/search-req
+	// from the LowID peers. In a closed 3-node mesh the buddy is the only reachable
+	// node and must accept publishes regardless of distance.
+	(void)distance;
+#endif
 
 	DEBUG_ONLY( wxString strInfo; )
 	uint16_t count = bio.ReadUInt16();
@@ -1107,9 +1115,17 @@ void CKademliaUDPListener::Process2PublishSourceRequest(const uint8_t *packetDat
 	CUInt128 distance(CKademlia::GetPrefs()->GetKadID());
 	distance ^= file;
 
+#ifndef PHASE_F_BUDDY
 	if (distance.Get32BitChunk(0) > SEARCHTOLERANCE && !::IsLanIP(wxUINT32_SWAP_ALWAYS(ip))) {
 		return;
 	}
+#else
+	// Phase F test-mesh: the buddy is far from random hashes by XOR so the
+	// production SEARCHTOLERANCE check rejects every publish/search-req
+	// from the LowID peers. In a closed 3-node mesh the buddy is the only reachable
+	// node and must accept publishes regardless of distance.
+	(void)distance;
+#endif
 
 	DEBUG_ONLY( wxString strInfo; )
 	uint8_t load = 0;
@@ -1287,9 +1303,17 @@ void CKademliaUDPListener::Process2PublishNotesRequest(const uint8_t *packetData
 	CUInt128 distance(CKademlia::GetPrefs()->GetKadID());
 	distance ^= target;
 
+#ifndef PHASE_F_BUDDY
 	if (distance.Get32BitChunk(0) > SEARCHTOLERANCE && !::IsLanIP(wxUINT32_SWAP_ALWAYS(ip))) {
 		return;
 	}
+#else
+	// Phase F test-mesh: the buddy is far from random hashes by XOR so the
+	// production SEARCHTOLERANCE check rejects every publish/search-req
+	// from the LowID peers. In a closed 3-node mesh the buddy is the only reachable
+	// node and must accept publishes regardless of distance.
+	(void)distance;
+#endif
 
 	CUInt128 source = bio.ReadUInt128();
 
@@ -1427,6 +1451,11 @@ void CKademliaUDPListener::ProcessFirewalledAckResponse(uint32_t lenPacket)
 // Used by Kad1.0 and Kad2.0
 void CKademliaUDPListener::ProcessFindBuddyRequest(const uint8_t *packetData, uint32_t lenPacket, uint32_t ip, uint16_t port, const CKadUDPKey& senderKey)
 {
+#ifdef PHASE_F_DEBUG_PROBES
+	AddDebugLogLineN(logClientKadUDP,
+		CFormat(wxT("PHASE_F_DEBUG: ProcessFindBuddyRequest entry from %s:%u lenPacket=%u"))
+			% KadIPToString(ip) % port % lenPacket);
+#endif
 	// Verify packet is expected size
 	CHECK_PACKET_MIN_SIZE(34);
 
@@ -1482,6 +1511,10 @@ void CKademliaUDPListener::ProcessFindBuddyRequest(const uint8_t *packetData, ui
 		// isn't strictly needed for NAT-T but doesn't conflict).
 		// Capacity / NAT-T-bit gating is already applied above.
 		if (!theApp->clientlist->IncomingServedBuddy(&contact, &BuddyID)) {
+#ifdef PHASE_F_DEBUG_PROBES
+			AddDebugLogLineN(logClientKadUDP,
+				wxT("PHASE_F_DEBUG: ProcessFindBuddyRequest EXIT — IncomingServedBuddy returned false (capacity?)"));
+#endif
 			return;
 		}
 	}

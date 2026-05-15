@@ -42,6 +42,16 @@ option (BUILD_WEBSERVER "compile aMule WebServer")
 option (BUILD_WXCAS "compile aMule GUI Statistics")
 option (BUILD_TESTING "Run Tests after compile" ON)
 
+# Phase F test-mesh: enables iptables-LowID workarounds + flood-ban / Kad-distance
+# bypasses so a 3-node closed mesh (HighID buddy + LowID peers) can exercise
+# NAT-T end-to-end. NOT for production builds. Each node sets exactly one role.
+option (PHASE_F_BUDDY        "Phase F test-mesh: HighID buddy role" OFF)
+option (PHASE_F_LOWID        "Phase F test-mesh: LowID source/leech role" OFF)
+option (PHASE_F_DEBUG_PROBES "Phase F test-mesh: stderr instrumentation for NAT-T data plane" OFF)
+if (PHASE_F_BUDDY AND PHASE_F_LOWID)
+	message (FATAL_ERROR "PHASE_F_BUDDY and PHASE_F_LOWID are mutually exclusive — set exactly one per node.")
+endif()
+
 if (PREFIX)
 	set (CMAKE_INSTALL_PREFIX "${PREFIX}")
 endif()

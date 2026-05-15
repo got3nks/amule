@@ -370,8 +370,14 @@ public:
 	// Cap on simultaneous served buddies beyond the single-buddy
 	// slot. eMuleAI uses a configurable max with default 4-8; our
 	// constant is conservative — bump to a pref if real-world
-	// data justifies it.
+	// data justifies it. Phase F test-mesh bumps this to 1024 so
+	// the buddy accepts every LowID peer bond attempt during a closed-mesh
+	// soak; production builds stay at 8.
+#ifdef PHASE_F_BUDDY
+	static constexpr uint32 kMaxServedBuddies = 1024;
+#else
 	static constexpr uint32 kMaxServedBuddies = 8;
+#endif
 
 	// Accept an additional served-buddy beyond the single-buddy
 	// slot. Returns true if accepted (created and queued for the

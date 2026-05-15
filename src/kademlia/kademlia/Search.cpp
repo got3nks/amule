@@ -248,6 +248,35 @@ void CSearch::JumpStart()
 		return;
 	}
 
+#ifdef PHASE_F_LOWID
+	// Phase F test-mesh: iptables OUTPUT restriction (sport 14672 allowed
+	// only to the buddy + test peers) silently drops sends to other m_possible
+	// entries. Without this fast-forward the search stalls on m_tried
+	// entries that never respond. Real-world peers reach every contact;
+	// this is a closed-mesh workaround only.
+	{
+		ContactMap::iterator first_resp = m_possible.end();
+		for (ContactMap::iterator it = m_possible.begin(); it != m_possible.end(); ++it) {
+			if (m_responded.count(it->first) > 0) {
+				first_resp = it;
+				break;
+			}
+		}
+		if (first_resp != m_possible.end() && first_resp != m_possible.begin()) {
+			unsigned erased = 0;
+			while (m_possible.begin() != first_resp) {
+				m_possible.erase(m_possible.begin());
+				++erased;
+			}
+#ifdef PHASE_F_DEBUG_PROBES
+			AddDebugLogLineN(logKadSearch,
+				CFormat(wxT("PHASE_F_DEBUG: JumpStart fast-forward type=%u erased=%u m_possible.size_after=%u"))
+					% m_type % erased % (unsigned)m_possible.size());
+#endif
+		}
+	}
+#endif
+
 	// Is this a find lookup and are the best two (=KADEMLIA_FIND_VALUE) nodes dead/unreachable?
 	// In this case try to discover more close nodes before using our other results
 	// The reason for this is that we may not have found the closest node alive due to results being limited to 2 contacts,
@@ -457,9 +486,23 @@ void CSearch::StorePacket()
 	}
 
 	// Make sure this is a valid node to store.
+#ifdef PHASE_F_LOWID
+	// Phase F test-mesh: the buddy's KadID is XOR-far from random search
+	// targets so the stock SEARCHTOLERANCE check would reject every
+	// response. Bypass for the search types we run in the closed mesh —
+	// the buddy is the only reachable peer and must be accepted regardless
+	// of distance. Real network has many nodes within SEARCHTOLERANCE
+	// so this never matters in production.
+	if (m_type != FINDBUDDY && m_type != FILE && m_type != KEYWORD && m_type != NOTES &&
+	    m_type != STOREFILE && m_type != STOREKEYWORD && m_type != STORENOTES &&
+	    fromDistance.Get32BitChunk(0) > SEARCHTOLERANCE && !::IsLanIP(wxUINT32_SWAP_ALWAYS(from->GetIPAddress()))) {
+		return;
+	}
+#else
 	if (fromDistance.Get32BitChunk(0) > SEARCHTOLERANCE && !::IsLanIP(wxUINT32_SWAP_ALWAYS(from->GetIPAddress()))) {
 		return;
 	}
+#endif
 
 	// What kind of search are we doing?
 	switch (m_type) {

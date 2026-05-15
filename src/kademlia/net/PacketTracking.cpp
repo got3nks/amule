@@ -107,6 +107,13 @@ bool CPacketTracking::IsOnOutTrackList(uint32_t ip, uint8_t opcode, bool dontRem
 
 bool CPacketTracking::InTrackListIsAllowedPacket(uint32_t ip, uint8_t opcode, bool /*bValidSenderkey*/)
 {
+#ifdef PHASE_F_BUDDY
+	// Phase F test-mesh: cp1+VPS in the 3-node closed mesh repeatedly send the
+	// same Kad opcodes (small routing zone forces re-poll of the same peer).
+	// The stock flood-ban would auto-ban them within minutes; skip the check
+	// when configured as the buddy role. NOT for production.
+	return true;
+#endif
 	// this tracklist tacks _incoming_ request packets and acts as a general flood protection by dropping
 	// too frequent requests from a single IP, avoiding response floods, processing time DOS attacks and slowing down
 	// other possible attacks/behavior (scanning indexed files, fake publish floods, etc)

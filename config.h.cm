@@ -18,6 +18,13 @@
    OFF by default until the implementation is complete. */
 #cmakedefine ENABLE_NAT_T
 
+/* Phase F test-mesh role gates. Set exactly one (BUDDY or LOWID) per node
+   via cmake -D. NOT for production builds. See .archive/nat-t-status.md
+   for full FP-patch documentation. */
+#cmakedefine PHASE_F_BUDDY 1
+#cmakedefine PHASE_F_LOWID 1
+#cmakedefine PHASE_F_DEBUG_PROBES 1
+
 /* Define to 1  if translation of program messages to the user's
    native language is requested. */
 #cmakedefine ENABLE_NLS 1
