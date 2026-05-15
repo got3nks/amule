@@ -284,6 +284,40 @@ bool CUtpLayer::CheckTimeoutNow()
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
+#ifdef PHASE_F_DEBUG_PROBES
+	// Wedge-state probe: when CONNECTED but write-side stuck (m_writable
+	// latched false with queued bytes and no UTP_STATE_WRITABLE to clear
+	// it), dump libutp stats + delays + MTU guess every ~5 seconds. This
+	// runs from UtpTimer::Tick under RuntimeLock — safe to call libutp
+	// query APIs here (in contrast to the on_read/on_sendto contexts
+	// where utp_get_stats has been observed to crash).
+	if (m_state == State::CONNECTED && !m_writable && !m_writeBuf.empty()
+	    && m_socket != NULL) {
+		static std::atomic<std::uint64_t> tick_counter{0};
+		const std::uint64_t tick = tick_counter.fetch_add(1);
+		if ((tick % 100) == 0) {   // 100 * 50ms tick = ~5s
+			utp_socket_stats* stats = utp_get_stats(m_socket);
+			if (stats != NULL) {
+				AddDebugLogLineN(logClient,
+					wxString::Format(
+						wxT("PHASE_F_DEBUG: UtpLayer WEDGE writeBuf=%zu/%zu rexmit=%u fastrexmit=%u nxmit=%u nrecv=%u nduprecv=%u mtu_guess=%u nbytes_xmit=%llu nbytes_recv=%llu"),
+						m_writeBuf.size(), kWriteBufferCapacity,
+						stats->rexmit, stats->fastrexmit,
+						stats->nxmit, stats->nrecv, stats->nduprecv,
+						stats->mtu_guess,
+						static_cast<unsigned long long>(stats->nbytes_xmit),
+						static_cast<unsigned long long>(stats->nbytes_recv)));
+			}
+			std::uint32_t ours = 0, theirs = 0, age = 0;
+			utp_get_delays(m_socket, &ours, &theirs, &age);
+			AddDebugLogLineN(logClient,
+				wxString::Format(
+					wxT("PHASE_F_DEBUG: UtpLayer WEDGE delays ours_ms=%u theirs_ms=%u age_ms=%u"),
+					ours, theirs, age));
+		}
+	}
+#endif
+
 	if (m_state != State::KEY_FRAME_SENT) {
 		// Fast path: timeouts only matter in KEY_FRAME_SENT. Saves
 		// the steady_clock read for the common case where most
