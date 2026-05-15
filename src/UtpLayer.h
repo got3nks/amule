@@ -95,11 +95,30 @@ public:
 	// CWND-allowed drain. eMuleAI uses 16 KiB; we match (plan Q5).
 	static constexpr std::size_t kWriteBufferCapacity = 16 * 1024;
 
-	// Maximum inbound bytes buffered between libutp's on_read
-	// delivery and the app's Recv(). 64 KiB is comfortably above
-	// the largest single-MTU delivery libutp can produce, leaving
-	// headroom for a few packets of jitter buffer.
-	static constexpr std::size_t kReadBufferCapacity = 64 * 1024;
+	// Soft cap on inbound bytes buffered between libutp's on_read
+	// delivery and the app's Recv(). Value = 2 * EMBLOCKSIZE (the
+	// largest payload an OP_SENDINGPART can carry) so a single full
+	// eD2k packet always fits, with one extra EMBLOCKSIZE of headroom
+	// for in-flight bytes that arrive between us advertising window=0
+	// (via OnGetReadBufferSize) and the peer seeing that update —
+	// typically ~1 RTT of lag.
+	//
+	// Bound is "soft" in that OnRead never drops bytes (libutp's
+	// on_read pointer is ephemeral — see utp_internal.cpp:2351 —
+	// so dropping = data loss → eD2k stream desync → ERR_TOOBIG).
+	// Flow control is enforced by OnGetReadBufferSize returning
+	// 0 once the buffer reaches this size, which causes libutp
+	// to advertise window=0 to the peer; the peer then stops
+	// sending after at most ~1 RTT.
+	//
+	// EMBLOCKSIZE is NOT included here because protocol/ed2k/Constants.h
+	// transitively pulls aMule's Types.h, whose `uint64` typedef
+	// conflicts with libutp's utp_types.h `uint64` typedef in any TU
+	// that touches both — and UtpCallbacks.cpp does. The literal
+	// value is mirrored from include/protocol/ed2k/Constants.h:84
+	// and the relationship is static_asserted in EMSocket.cpp where
+	// Constants.h is already in scope.
+	static constexpr std::size_t kReadBufferCapacity = 2 * 184320;
 
 	// User hash size (CMD4Hash) — duplicated locally so this header
 	// doesn't pull in CMD4Hash.h. Must match

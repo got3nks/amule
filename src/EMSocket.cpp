@@ -38,8 +38,25 @@
 #include "Preferences.h"
 #include "ScopedPtr.h"
 
+#ifdef ENABLE_NAT_T
+#include "UtpLayer.h"   // CUtpLayer::kReadBufferCapacity — assert vs EMBLOCKSIZE below
+#endif
+
 
 const uint32 MAX_PACKET_SIZE = 2000000;
+
+#ifdef ENABLE_NAT_T
+// Anchor for CUtpLayer::kReadBufferCapacity, which is set to 2 * EMBLOCKSIZE.
+// The header can't pull in protocol/ed2k/Constants.h because that drags in
+// aMule's Types.h whose `uint64` typedef conflicts with libutp's utp_types.h
+// in any TU that touches both (UtpCallbacks.cpp does). Verifying the
+// relationship here keeps the soft cap in sync with EMBLOCKSIZE at build
+// time — if EMBLOCKSIZE ever changes, this assert fires and the developer
+// is pointed straight at UtpLayer.h.
+static_assert(CUtpLayer::kReadBufferCapacity == 2 * EMBLOCKSIZE,
+              "CUtpLayer::kReadBufferCapacity must equal 2 * EMBLOCKSIZE "
+              "(see UtpLayer.h)");
+#endif
 
 // cppcheck-suppress uninitMemberVar CEMSocket::pendingHeader
 CEMSocket::CEMSocket(const CProxyData *ProxyData)

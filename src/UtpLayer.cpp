@@ -491,11 +491,22 @@ void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 		return;
 	}
 
-	const std::size_t available = kReadBufferCapacity - m_readBuf.size();
-	const std::size_t to_copy = std::min(len, available);
-	if (to_copy > 0) {
-		m_readBuf.insert(m_readBuf.end(), data, data + to_copy);
-	}
+	// Always consume all `len` bytes from libutp's on_read delivery.
+	// The data pointer is ephemeral — libutp moves on (and frees the
+	// payload) the moment this callback returns (utp_internal.cpp:2351).
+	// Capping the copy at kReadBufferCapacity would silently drop the
+	// overflow while utp_read_drained() below still tells libutp the
+	// window slid forward — the bytes would be gone for good, the
+	// eD2k stream would desync, and EMSocket::OnReceive would trip
+	// ERR_TOOBIG on the next garbage header.
+	//
+	// Flow control happens at OnGetReadBufferSize: once m_readBuf
+	// reaches kReadBufferCapacity that callback returns 0, libutp
+	// advertises window=0 to the peer, and the peer stops sending
+	// after ~1 RTT. The buffer can briefly exceed kReadBufferCapacity
+	// by that in-flight delta — sized at 2× EMBLOCKSIZE precisely to
+	// absorb it.
+	m_readBuf.insert(m_readBuf.end(), data, data + len);
 
 	if (m_socket != NULL) {
 		utp_read_drained(m_socket);
@@ -508,7 +519,7 @@ void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 	// immediately and the real OnReceive dispatch happens on the
 	// main thread. Re-entrant libutp calls from the callback would
 	// deadlock — contract documented at SetDataAvailableCallback.
-	if (to_copy > 0 && m_data_available_cb) {
+	if (m_data_available_cb) {
 		m_data_available_cb();
 	}
 }
