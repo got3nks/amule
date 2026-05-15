@@ -36,6 +36,8 @@
 #ifdef PHASE_F_DEBUG_PROBES
 #include "Logger.h"
 #include <wx/string.h>
+#include <atomic>
+#include <cstdint>
 #endif
 
 // Adaptive sizing of libutp's UTP_RCVBUF based on the kernel-allocated
