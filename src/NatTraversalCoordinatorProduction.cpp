@@ -20,6 +20,7 @@
 
 #include "NatTraversalCoordinator.h"
 
+
 #ifdef ENABLE_NAT_T
 
 // Production thunks for CNatTraversalCoordinator's five delegates.
@@ -37,8 +38,10 @@
 
 #include "amule.h"               // theApp
 #include "ClientList.h"          // GetBuddy, GetClientsByHash
+#include "ClientTCPSocket.h"     // CClientTCPSocket (responder handoff)
 #include "ClientUDPSocket.h"     // CClientUDPSocket (complete type for theApp->clientudp)
 #include "DownloadQueue.h"       // GetDownloadClientByIP_UDP
+#include "GuiEvents.h"           // CoreNotify_LibSocketReceive (responder handoff)
 #include "UploadQueue.h"         // GetWaitingClientByIP_UDP
 #include "updownclient.h"        // CUpDownClient
 #include "MuleUDPSocket.h"       // ::SendPacket
@@ -248,6 +251,110 @@ CUtpLayer* production_create_utp_layer(
 	// CUtpLayer::Connect internally registers the layer in
 	// UtpLayerRegistry under both peer_hash and peer_addr keys
 	// (B7.5 wiring) — no extra Register call needed here.
+
+	// Phase E3 responder-side handoff: the initiator's success
+	// path in BaseClient.cpp::OnNatTraversalComplete creates a fresh
+	// CClientTCPSocket, AttachUtpLayers(layer), installs a data-available
+	// callback, then fires ConnectionEstablished() to send OP_HELLO.
+	// The endpoint side is purely reactive — it must NOT call
+	// ConnectionEstablished — but it still needs the CClientTCPSocket
+	// + AttachUtpLayer wiring so that when the initiator's HELLO arrives
+	// over uTP, libutp's on_read → CUtpLayer::OnRead → the data-available
+	// callback wakes CClientTCPSocket::OnReceive → ProcessPacket. Without
+	// this, accepted SYN data lands in CUtpLayer::m_readBuf and never
+	// surfaces; the eD2k packet parser is never invoked on the responder.
+	//
+	// eMuleAI does the equivalent in CClientUDPSocket.cpp:1262-1314
+	// inside OP_RENDEZVOUS handling: it creates target->socket =
+	// new CClientReqSocket(target), calls InitUtpSupport() to insert
+	// CUtpSocket into the CAsyncSocketEx layer chain, and sets
+	// SetUtpLocalInitiator(false). When the SYN arrives, on_accept
+	// adopts the libutp socket onto the existing wrapper and the
+	// rest of the eD2k flow runs unchanged.
+	if (!initiator && theApp != nullptr && theApp->clientlist != nullptr) {
+		CMD4Hash peer_user_hash(peer_hash);
+		CClientList::SourceList sources =
+			theApp->clientlist->GetClientsByHash(peer_user_hash);
+		CUpDownClient* peer = nullptr;
+		for (auto& ref : sources) {
+			CUpDownClient* candidate = ref.GetClient();
+			if (candidate != nullptr) {
+				peer = candidate;
+				break;
+			}
+		}
+		// Cold-start placeholder (eMuleAI parity, ClientUDPSocket.cpp:1085-1119):
+		// if the responder has zero prior knowledge of the requester
+		// (cold-start NAT-T — neither side ever exchanged Hello,
+		// source-exchange, or callback), create a placeholder CUpDownClient
+		// from the rendezvous payload (the buddy has already authenticated
+		// the hash by accepting us as a served-buddy and forwarding the
+		// rendezvous TCP packet). Without this, the responder lookup fails and
+		// the responder-side eD2k path is never wired — the inbound
+		// uTP data sits in CUtpLayer's read buffer with no consumer.
+		if (peer == nullptr &&
+		    peer_addr->sa_family == AF_INET &&
+		    addr_len >= static_cast<socklen_t>(sizeof(struct sockaddr_in))) {
+			const struct sockaddr_in* sin =
+				reinterpret_cast<const struct sockaddr_in*>(peer_addr);
+			const uint32_t ip_host  = ntohl(sin->sin_addr.s_addr);
+			const uint16_t kad_port = ntohs(sin->sin_port);
+			// CUpDownClient ctor with ed2kID=false treats in_userid as
+			// the raw IP in network byte order; pass it pre-swapped so
+			// the ctor's swap-back puts m_nConnectIP in host order.
+			peer = new CUpDownClient(
+				/*in_port=*/0,                  // TCP port unknown; HELLO will fill it
+				/*in_userid=*/htonl(ip_host),   // ctor swaps this back internally
+				/*in_serverip=*/0,
+				/*in_serverport=*/0,
+				/*in_reqfile=*/nullptr,
+				/*ed2kID=*/false,
+				/*checkfriend=*/true);
+			peer->SetIP(ip_host);
+			peer->SetKadPort(kad_port);
+			peer->SetUserHash(peer_user_hash);
+			// Cold-start bypasses ProcessHelloTypePacket so credits
+			// stays null; SendBlockData → AddUploaded would crash on the
+			// first OP_SENDINGPART. Explicit lookup mirrors eMuleAI's
+			// ClientList.cpp:2054 pattern for client paths that skip Hello.
+			peer->InitCreditsAfterHandshake();
+			peer->SetSourceFrom(SF_KADEMLIA);
+			theApp->clientlist->AddClient(peer);
+		}
+		if (peer != nullptr) {
+			// Drop any stale socket on the peer before slotting the
+			// new one. Mirrors BaseClient.cpp:1640-1645 logic.
+			if (peer->GetSocket() != nullptr) {
+				peer->GetSocket()->Safe_Delete();
+				peer->SetSocket(nullptr);
+			}
+			// CClientTCPSocket's ctor calls SetClient → m_client->SetSocket(this),
+			// so the new socket is automatically slotted into peer->m_socket.
+			CClientTCPSocket* socket = new CClientTCPSocket(
+				peer, thePrefs::GetProxyData());
+			socket->AttachUtpLayer(layer);
+			layer->SetDataAvailableCallback([socket]() {
+				CoreNotify_LibSocketReceive(socket, 0);
+			});
+			// Encryption: same logic as initiator. The peer's hash is
+			// known by definition (we matched on it above).
+			if (peer->SupportsCryptLayer()
+			    && thePrefs::IsClientCryptLayerSupported()
+			    && (peer->RequestsCryptLayer()
+			        || thePrefs::IsClientCryptLayerRequested())) {
+				socket->SetConnectionEncryption(true,
+					peer->GetUserHash().GetHash(), false);
+			} else {
+				socket->SetConnectionEncryption(false, nullptr, false);
+			}
+			// Deliberately NOT calling ConnectionEstablished — the
+			// responder waits for the initiator's HELLO over uTP and
+			// then dispatches it through the normal eD2k packet path
+			// (ClientTCPSocket::ProcessPacket OP_HELLO branch, which
+			// runs ProcessHelloPacket / SendHelloAnswer / etc).
+		}
+	}
+
 	return layer;
 }
 

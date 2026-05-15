@@ -20,6 +20,7 @@
 
 #include "UtpEnvironment.h"
 
+
 #ifdef ENABLE_NAT_T
 
 #include <utp.h>
@@ -104,7 +105,7 @@ void ProcessInboundUtpPacket(const unsigned char* bytes, std::size_t len,
 	if (g_context == NULL) {
 		return;
 	}
-	utp_process_udp(g_context, bytes, len, src, src_len);
+	const ssize_t result = utp_process_udp(g_context, bytes, len, src, src_len);
 }
 
 } // namespace UtpEnvironment

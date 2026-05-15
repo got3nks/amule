@@ -47,6 +47,7 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		ThreadTasks.cpp
 		NatTraversalCoordinator.cpp
 		NatTraversalCoordinatorProduction.cpp
+		NetworkInfo.cpp
 		UtpCallbacks.cpp
 		UtpCallbacksProduction.cpp
 		UtpEncryption.cpp

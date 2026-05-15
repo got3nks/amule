@@ -467,7 +467,12 @@ SocketSentBytes CEMSocket::Send(uint32 maxNumberOfBytesToSend, uint32 minFragSiz
 {
 	std::lock_guard<std::mutex> lock(m_sendLocker);
 
-	//printf("* Attempt to send a packet on socket %p\n", this);
+	{
+		static int log_count = 0;
+		if (log_count < 10) {
+			log_count++;
+		}
+	}
 
 	if (byConnected == ES_DISCONNECTED) {
 		//printf("* Disconnected socket %p\n", this);
@@ -608,6 +613,19 @@ SocketSentBytes CEMSocket::Send(uint32 maxNumberOfBytesToSend, uint32 minFragSiz
 				} else if (LastError()) {
 					// Send() gave an error
 					anErrorHasOccured = true;
+				} else if (result == 0) {
+					// Defensive: transport accepted 0 bytes without flagging
+					// BlocksWrite() or LastError(). For TCP this never fires
+					// because boost::asio sets BlocksWrite() when its kernel
+					// queue is full. For NAT-T uTP the CUtpLayer write buffer
+					// can hit its 16 KiB cap (kWriteBufferCapacity) before
+					// libutp's CWND opens up, and there's no equivalent
+					// back-pressure signal — without this branch the outer
+					// loop spins calling m_pUtpLayer->Send forever. Treat as
+					// blocked; the throttler's next tick will retry once
+					// libutp drains and DrainWriteBufferLocked frees space.
+					SocketSentBytes returnVal = { true, sentStandardPacketBytesThisCall, sentControlPacketBytesThisCall };
+					return returnVal;
 				} else {
 					m_bBusy = false;
 				}

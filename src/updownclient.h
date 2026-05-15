@@ -184,6 +184,14 @@ public:
 	void		SetServerPort(uint16 nPort)	{ m_nServerPort = nPort; }
 	const CMD4Hash&	GetUserHash() const		{ return m_UserHash; }
 	void		SetUserHash(const CMD4Hash& userhash);
+	// Looks up + assigns m_pCredits from the userhash. ProcessHelloTypePacket
+	// already does this inline, but NAT-T cold-start paths (responder-side
+	// placeholder created from a forwarded rendezvous payload) never
+	// receive a Hello, so the credits pointer stays null and SendBlockData
+	// crashes on its first AddUploaded call. Mirrors eMuleAI's pattern at
+	// ClientList.cpp:2054 of explicit credit lookup for client paths that
+	// bypass the Hello handshake.
+	void		InitCreditsAfterHandshake();
 	void		ValidateHash()			{ m_HasValidHash = !m_UserHash.IsEmpty(); }
 	bool		HasValidHash() const		{ return m_HasValidHash; }
 	uint32		GetVersion() const		{ return m_nClientVersion;}

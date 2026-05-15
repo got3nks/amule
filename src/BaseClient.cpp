@@ -1522,6 +1522,17 @@ bool CUpDownClient::TryNatTraversal()
 		return false;
 	}
 
+	// NAT-T cold start: the uTP transport carries eD2k packets but
+	// SKIPS the OP_HELLO exchange — ProcessHelloTypePacket never runs,
+	// so CUpDownClient::credits would stay null and the first
+	// uTP-delivered OP_SENDINGPART would crash in ProcessBlockPacket →
+	// AddDownloaded (or the upload-side equivalent SendBlockData →
+	// AddUploaded). Initialise credits here, at the NAT-T-specific
+	// entry point only — non-NAT-T HighID peers reached via Kad still
+	// go through TCP Hello + ProcessHelloTypePacket which performs the
+	// IP/userhash ban check we deliberately don't replicate here.
+	InitCreditsAfterHandshake();
+
 	// Build the eMuleAI-compatible OP_REASKCALLBACKUDP payload.
 	NatTraversal::RequesterCallbackPayload payload;
 	std::memcpy(payload.target_buddy_kadid, GetBuddyID(), 16);
@@ -1568,20 +1579,17 @@ bool CUpDownClient::TryNatTraversal()
 			/*bKad=*/false, /*nReceiverVerifyKey=*/0);
 	}
 
-	// Wrap in OP_EMULEPROT + OP_REASKCALLBACKUDP, send to target's buddy.
-	CMemFile mem;
-	mem.Write(body.data(), body.size());
-	CPacket* packet = new CPacket(mem, OP_EMULEPROT, OP_REASKCALLBACKUDP);
-	theStats::AddUpOverheadFileRequest(packet->GetPacketSize());
-	theApp->clientudp->SendPacket(packet,
-	                              GetBuddyIP(), GetBuddyPort(),
-	                              /*bEncrypt=*/false, /*pachTargetClientHashORKadID=*/nullptr,
-	                              /*bKad=*/false, /*nReceiverVerifyKey=*/0);
-
-	// Register the pending entry so OnInboundHolePunch can match the
-	// target's HOLEPUNCH burst back to us. Match address is the target's
-	// external UDP endpoint (GetConnectIP + GetKadPort). The callback
-	// posts via CoreNotify_NatTraversalComplete (E5 thread marshal).
+	// Register the pending entry BEFORE sending OP_REASKCALLBACKUDP — the
+	// buddy may forward the rendezvous fast enough that the target's
+	// 12-packet HOLEPUNCH reverse burst (responder side, eMuleAI
+	// ClientUDPSocket.cpp:1357-1383) lands on our boost::asio worker
+	// before our main thread reaches the Register call. With the previous
+	// ordering, the worker's OnInboundHolePunch saw an empty m_pending,
+	// returned found=0, and dropped all 12 packets — the rendezvous
+	// looked succeeded on the wire but never created a CUtpLayer.
+	// Match address is the target's external UDP endpoint (GetConnectIP +
+	// GetKadPort). The callback posts via CoreNotify_NatTraversalComplete
+	// (E5 thread marshal).
 	CMD4Hash target_hash = GetUserHash();
 	auto on_complete = [target_hash](bool ok, CUtpLayer* layer) {
 		CoreNotify_NatTraversalComplete(target_hash, ok, layer);
@@ -1600,6 +1608,16 @@ bool CUpDownClient::TryNatTraversal()
 		reinterpret_cast<sockaddr*>(&target_addr),
 		sizeof(target_addr),
 		std::move(on_complete));
+
+	// Now wrap + send OP_EMULEPROT + OP_REASKCALLBACKUDP to target's buddy.
+	CMemFile mem;
+	mem.Write(body.data(), body.size());
+	CPacket* packet = new CPacket(mem, OP_EMULEPROT, OP_REASKCALLBACKUDP);
+	theStats::AddUpOverheadFileRequest(packet->GetPacketSize());
+	theApp->clientudp->SendPacket(packet,
+	                              GetBuddyIP(), GetBuddyPort(),
+	                              /*bEncrypt=*/false, /*pachTargetClientHashORKadID=*/nullptr,
+	                              /*bKad=*/false, /*nReceiverVerifyKey=*/0);
 
 	m_fNatTraversalInFlight = 1;
 	AddDebugLogLineN(logClient,
@@ -1663,20 +1681,13 @@ void CUpDownClient::OnNatTraversalComplete(bool ok, CUtpLayer* layer)
 		CoreNotify_LibSocketReceive(sock, 0);
 	});
 
-	// Encryption: same setup that CUpDownClient::Connect (TCP path)
-	// does. Crypt-layer support and key-derivation depend on whether
-	// we have the peer's user hash + their crypt prefs — the latter
-	// arrived via the Hello / source-exchange that gave us the peer
-	// in the first place. SetConnectionEncryption sets the
-	// CEncryptedStreamSocket state machine; the obfuscation handshake
-	// proceeds over uTP transparently (same byte flow as TCP).
-	if (HasValidHash() && SupportsCryptLayer()
-	    && thePrefs::IsClientCryptLayerSupported()
-	    && (RequestsCryptLayer() || thePrefs::IsClientCryptLayerRequested())) {
-		m_socket->SetConnectionEncryption(true, GetUserHash().GetHash(), false);
-	} else {
-		m_socket->SetConnectionEncryption(false, nullptr, false);
-	}
+	// NAT-T transport: skip TCP-level obfuscation. The uTP layer already
+	// encrypts via production_encrypt; layering TCP obfuscation on top
+	// would also deadlock — the obfuscation handshake fires from OnConnect,
+	// which doesn't run for the synthetic uTP socket, so m_StreamCryptState
+	// would stay ECS_PENDING and IsEncryptionLayerReady() would block
+	// CEMSocket::Send from ever draining the send queue.
+	m_socket->SetConnectionEncryption(false, nullptr, false);
 
 	// Drive ConnectionEstablished (sends Hello + transitions state).
 	// AttachUtpLayer already set byConnected = ES_CONNECTED so the
@@ -2741,6 +2752,20 @@ void CUpDownClient::SetUserHash(const CMD4Hash& userhash)
 	m_UserHash = userhash;
 
 	ValidateHash();
+}
+
+void CUpDownClient::InitCreditsAfterHandshake()
+{
+	// NAT-T cold-start paths (responder-side OnInboundRendezvous creates
+	// a placeholder CUpDownClient from the rendezvous payload) never run
+	// ProcessHelloTypePacket, so the credits pointer stays null. The
+	// first SendBlockData call then dereferences a null credits pointer
+	// in AddUploaded → GetCurrentIdentState. Mirrors the credit-lookup
+	// half of ProcessHelloTypePacket without the Ban / userhash-change
+	// detection (cold-start clients have no prior hash to compare).
+	if (credits == NULL && !m_UserHash.IsEmpty()) {
+		credits = theApp->clientcredits->GetCredit(m_UserHash);
+	}
 }
 
 EUtf8Str CUpDownClient::GetUnicodeSupport() const

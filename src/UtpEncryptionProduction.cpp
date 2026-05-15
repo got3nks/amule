@@ -33,17 +33,30 @@
 // + a full daemon build are both on).
 
 #include "EncryptedDatagramSocket.h"
+#include "amule.h"
 
 #include <cstring>
 
 namespace {
 
-// Outbound: encrypt `plaintext_len` bytes using `key` (the recipient's
-// user hash) via EncryptSendClient. EncryptSendClient takes ownership
-// of the input buffer (does `delete[] *buf` internally — see
-// EncryptedDatagramSocket.cpp:370) and returns a new heap buffer in
-// *buf; the thunk copies that out into the caller's std::vector and
-// frees the new buffer.
+// Outbound: opportunistic-encrypt `plaintext_len` bytes using `key`
+// (the recipient's user hash) via EncryptSendClient. Mirrors
+// eMuleAI's gate at ClientUDPSocket.cpp:2092 and aMule's own existing
+// eD2k UDP posture at MuleUDPSocket.cpp:277: encrypt only when our
+// public IP is known (kad=false ed2k-keyed obfuscation depends on
+// sender's public IP in the MD5 key derivation; with publicIP==0 the
+// receiver's decrypt MD5 would mismatch and reject the frame). When
+// publicIP==0, fall through to plaintext — the receiver's
+// DecryptReceivedClient passthroughs `0xB2`-prefixed packets, and the
+// inner libutp bytes start with a uTP type/version byte that is never
+// a recognized eD2k opcode, so the inner DecryptReceivedClient call
+// returns rc == ciphertext_len which production_decrypt now treats as
+// a valid plaintext signal.
+//
+// EncryptSendClient takes ownership of the input buffer (does
+// `delete[] *buf` internally — see EncryptedDatagramSocket.cpp:370)
+// and returns a new heap buffer in *buf; the thunk copies that out
+// into the caller's std::vector and frees the new buffer.
 bool production_encrypt(const std::uint8_t* plaintext,
                         std::size_t plaintext_len,
                         const std::uint8_t key[UtpEncryption::kUserHashSize],
@@ -51,6 +64,27 @@ bool production_encrypt(const std::uint8_t* plaintext,
 {
 	if (plaintext == NULL || plaintext_len == 0 || key == NULL) {
 		return false;
+	}
+
+	// ignorelocal=true: m_localip (e.g. 127.0.1.1 from /etc/hosts) is never a key the peer can reproduce.
+	const uint32_t public_ip = (theApp != NULL) ? theApp->GetPublicIP(true) : 0;
+	{
+		static int log_count = 0;
+		if (log_count < 6) {
+			log_count++;
+		}
+	}
+	if (public_ip == 0) {
+		// Plaintext fallback: copy bytes verbatim. The caller's
+		// envelope ([0xB2, sub-byte, ...]) is added on top of this
+		// output; on receive, DecryptReceivedClient sees the outer
+		// 0xB2 and passthroughs, ClientUDPSocket's OP_UDPRESERVEDPROT2
+		// dispatch reads the sub-byte and calls UnwrapUtp/KeyFrame
+		// with the inner bytes; production_decrypt then sees the
+		// inner-DecryptReceivedClient passthrough (rc == clen) and
+		// hands the plaintext up.
+		out.assign(plaintext, plaintext + plaintext_len);
+		return true;
 	}
 
 	// Make a heap-allocated input copy with the layout EncryptSendClient
@@ -61,7 +95,7 @@ bool production_encrypt(const std::uint8_t* plaintext,
 	// After this call, input_buf points to a new heap-allocated
 	// ciphertext buffer; the original input bytes have been deleted
 	// by the function. kad=false → ed2k-style encryption keyed on
-	// the recipient's user hash.
+	// the recipient's user hash + sender's public IP.
 	int rc = CEncryptedDatagramSocket::EncryptSendClient(
 		&input_buf,
 		static_cast<int>(plaintext_len),
@@ -80,11 +114,29 @@ bool production_encrypt(const std::uint8_t* plaintext,
 	return true;
 }
 
-// Inbound: decrypt `ciphertext_len` bytes via DecryptReceivedClient.
+// Inbound: opportunistic-decrypt `ciphertext_len` bytes via
+// DecryptReceivedClient. Mirrors eMuleAI's receive-side behavior:
+// accept BOTH encrypted (rc < clen, MD5/RC4 decrypt succeeded against
+// our user hash + sender's IP) and plaintext (rc == clen, sender
+// emitted unencrypted because its publicIP was 0 at send time).
+//
+// The plaintext path is safe because the caller (UnwrapUtpFrame /
+// UnwrapKeyFrame) has already validated the outer [0xB2, sub-byte]
+// preamble. The inner libutp bytes start with a uTP type/version byte
+// (e.g. 0x41 for ST_SYN) that is never a recognized eD2k opcode, so
+// DecryptReceivedClient's first-byte switch (lines 140-150) skips the
+// passthrough-by-opcode shortcut and goes into the decrypt loop;
+// failing to find the magic value, it returns bufLen and *bufOut =
+// bufIn — exactly the bytes the sender wrote. If a peer genuinely
+// encrypted with a key we don't share, the same return path yields
+// RC4-garbled bytes that libutp will reject downstream, so the
+// downgrade is benign (no false accept of unauthenticated traffic).
+//
 // DecryptReceivedClient does NOT take ownership of its input buffer;
-// it sets *bufOut to a pointer inside bufIn (past the header) and
-// decrypts in-place. We pass a working copy of the ciphertext so the
-// in-place decryption doesn't disturb the caller's input.
+// it sets *bufOut to a pointer inside bufIn (past the header for the
+// encrypted case, equal to bufIn for the plaintext case) and decrypts
+// in-place. We pass a working copy of the ciphertext so the in-place
+// decryption doesn't disturb the caller's input.
 bool production_decrypt(const std::uint8_t* ciphertext,
                         std::size_t ciphertext_len,
                         std::uint32_t source_ip,
@@ -92,6 +144,13 @@ bool production_decrypt(const std::uint8_t* ciphertext,
 {
 	if (ciphertext == NULL || ciphertext_len == 0) {
 		return false;
+	}
+	{
+		static int log_count = 0;
+		if (log_count < 6) {
+			log_count++;
+			const uint32_t my_publicIP = (theApp != NULL) ? theApp->GetPublicIP() : 0;
+		}
 	}
 
 	std::vector<std::uint8_t> working_copy(ciphertext, ciphertext + ciphertext_len);
@@ -107,17 +166,26 @@ bool production_decrypt(const std::uint8_t* ciphertext,
 		&receiver_verify_key,
 		&sender_verify_key);
 
+	{
+		static int dec_log_count = 0;
+		if (dec_log_count < 6) {
+			dec_log_count++;
+		}
+	}
 	if (rc <= 0 || buf_out_ptr == NULL) {
 		return false;
 	}
-	// rc == ciphertext_len means the buffer was passed through
-	// (DecryptReceivedClient's "not encrypted" path — happens if
-	// the first byte happens to be one of the eD2k opcodes). For our
-	// inner ciphertext that's a malformed-packet signal; reject.
-	if (static_cast<std::size_t>(rc) == ciphertext_len) {
-		return false;
-	}
 
+	// rc < clen → DecryptReceivedClient succeeded; *bufOut points
+	// past the obfuscation header (CRYPT_HEADER_WITHOUTPADDING +
+	// padding) into the decrypted payload.
+	//
+	// rc == clen → either (a) the sender emitted plaintext (their
+	// publicIP was 0, opportunistic encryption skipped) or (b)
+	// encryption was attempted but the MD5 magic value didn't match
+	// (wrong key, corruption). Both yield *bufOut == working_copy
+	// data unchanged. We accept either; libutp validates the inner
+	// packet shape and rejects garbage in case (b).
 	out.assign(buf_out_ptr, buf_out_ptr + rc);
 	return true;
 }

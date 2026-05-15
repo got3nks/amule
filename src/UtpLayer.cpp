@@ -77,6 +77,7 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
+
 	if (m_state != State::INIT ||
 	    our_hash == NULL || peer_hash == NULL ||
 	    peer_addr == NULL || addr_len == 0) {
@@ -153,6 +154,7 @@ bool CUtpLayer::Connect(const std::uint8_t our_hash[kUserHashSize],
 		} else {
 			m_state = State::FAILED;
 		}
+	} else {
 	}
 
 	return true;
@@ -218,6 +220,7 @@ void CUtpLayer::OnUtpAccept(utp_socket* accepted_socket)
 	// Lock NOT acquired here — caller (libutp via UtpCallbacks::on_accept)
 	// holds RuntimeLock around the utp_process_udp call that triggered
 	// this on_accept invocation.
+
 	if (accepted_socket == NULL) {
 		return;
 	}
@@ -285,6 +288,7 @@ std::int64_t CUtpLayer::Send(const void* buf, std::size_t count)
 {
 	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
+
 	if (m_state == State::CLOSED || m_state == State::FAILED ||
 	    buf == NULL || count == 0) {
 		return 0;
@@ -308,17 +312,35 @@ std::int64_t CUtpLayer::Send(const void* buf, std::size_t count)
 
 std::int64_t CUtpLayer::Recv(void* buf, std::size_t count)
 {
-	std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
+	std::function<void()> cb_to_fire;
+	std::int64_t copied;
+	{
+		std::lock_guard<std::mutex> lock(UtpEnvironment::RuntimeLock());
 
-	if (buf == NULL || count == 0 || m_readBuf.empty()) {
-		return 0;
+		if (buf == NULL || count == 0 || m_readBuf.empty()) {
+			return 0;
+		}
+
+		const std::size_t to_copy = std::min(count, m_readBuf.size());
+		std::memcpy(buf, m_readBuf.data(), to_copy);
+		m_readBuf.erase(m_readBuf.begin(),
+		                m_readBuf.begin() + static_cast<std::ptrdiff_t>(to_copy));
+		copied = static_cast<std::int64_t>(to_copy);
+
+		// Mirror LibSocketAsio's PostReadEvent(1): if the read buffer
+		// still has bytes after this pop, schedule another OnReceive.
+		// CEMSocket::OnReceive's do-while exits after each complete
+		// packet (pendingHeaderSize resets to 0), so multi-packet uTP
+		// frames need the caller re-entered. Without this, packet #2+
+		// in the same frame stays in m_readBuf indefinitely.
+		if (!m_readBuf.empty()) {
+			cb_to_fire = m_data_available_cb;
+		}
 	}
-
-	const std::size_t to_copy = std::min(count, m_readBuf.size());
-	std::memcpy(buf, m_readBuf.data(), to_copy);
-	m_readBuf.erase(m_readBuf.begin(),
-	                m_readBuf.begin() + static_cast<std::ptrdiff_t>(to_copy));
-	return static_cast<std::int64_t>(to_copy);
+	if (cb_to_fire) {
+		cb_to_fire();
+	}
+	return copied;
 }
 
 void CUtpLayer::Close()
@@ -382,17 +404,35 @@ bool CUtpLayer::GetPeerHash(std::uint8_t out[kUserHashSize]) const
 	return true;
 }
 
+// Calling libutp's utp_get_delays/utp_get_stats from inside a callback
+// (OnRead/OnSendto runs under RuntimeLock + libutp's internal state at
+// that moment) reliably crashes both initiator and responder. So skip
+// those and just dump our own state — packet timing comes from strace.
+static void PHASE_F_DUMP_STATS(utp_socket* sock, const char* tag,
+                               std::size_t writebuf, std::size_t readbuf)
+{
+}
+
 void CUtpLayer::OnSendto(const std::uint8_t* buf, std::size_t len,
                          const struct sockaddr* to, socklen_t to_len)
 {
 	// Lock NOT acquired here — caller (libutp via UtpCallbacks) holds it.
+	// Only dump stats once we're past the initial SYN — m_socket isn't
+	// fully wired until utp_connect returns, and utp_get_delays asserts
+	// on CS_UNINITIALIZED sockets.
+	if (m_state == State::CONNECTED) {
+		PHASE_F_DUMP_STATS(m_socket, "OnSendto", m_writeBuf.size(), m_readBuf.size());
+	}
 	if (buf == NULL || len == 0 || to == NULL || to_len == 0) {
 		return;
 	}
 
-	// Wrap with [0xB2, 0x00, encrypt(packet, peer_hash)]. If wrap
-	// fails (no encrypt delegate installed, etc.) the packet is
-	// dropped — mandatory-encryption guarantee.
+	// Wrap with [0xB2, 0x00, encrypt-or-plaintext(packet, peer_hash)].
+	// The encrypt delegate decides between ciphertext and plaintext
+	// based on whether our publicIP is known (opportunistic
+	// encryption — see UtpEncryption.h for rationale). If the delegate
+	// itself fails (not installed, allocator error, etc.) the packet
+	// is dropped — we never emit a half-wrapped frame.
 	std::vector<std::uint8_t> wrapped;
 	if (!UtpEncryption::WrapUtpFrame(buf, len, m_peer_hash, wrapped)) {
 		return;
@@ -443,6 +483,9 @@ void CUtpLayer::OnStateChange(int new_state)
 
 void CUtpLayer::OnRead(const std::uint8_t* data, std::size_t len)
 {
+	if (m_state == State::CONNECTED) {
+		PHASE_F_DUMP_STATS(m_socket, "OnRead", m_writeBuf.size(), m_readBuf.size());
+	}
 	// Lock NOT acquired here — caller (libutp via UtpCallbacks) holds it.
 	if (data == NULL || len == 0) {
 		return;

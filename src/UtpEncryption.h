@@ -42,10 +42,19 @@
 //     using thePrefs::GetUserHash() (the receiver's own hash; same
 //     value the sender used as the key).
 //
-// Encryption is mandatory — there is no plaintext path. The
-// plaintext envelope helpers in UtpKeyFrame.{h,cpp} exist for
-// diagnostics + the encrypted-payload assembly here; they are NOT
-// used directly on the wire.
+// Encryption is OPPORTUNISTIC, not mandatory. The framework helpers
+// (Wrap/Unwrap) always go through the registered encrypt/decrypt
+// delegate; whether the delegate produces ciphertext or copies bytes
+// verbatim is its choice. The production delegate
+// (UtpEncryptionProduction.cpp) gates encryption on
+// `theApp->GetPublicIP() != 0` — same condition aMule's own existing
+// eD2k UDP path uses at MuleUDPSocket.cpp:277, and the same condition
+// eMuleAI uses for uTP at ClientUDPSocket.cpp:2092. When the gate is
+// closed (publicIP == 0, e.g. Kad-only deployment that hasn't
+// completed firewall detection yet), the delegate emits plaintext.
+// On receive, the production delegate accepts both encrypted and
+// plaintext inner payloads — full rationale in production_decrypt.
+// Wire-compatible with eMuleAI in both directions.
 //
 // Testability: the encrypt and decrypt operations are pluggable via
 // delegate function pointers (same pattern as

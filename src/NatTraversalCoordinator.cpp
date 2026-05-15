@@ -322,17 +322,38 @@ void CNatTraversalCoordinator::OnInboundRendezvous(
 	// reactive role. The CUtpLayer's caller (typically Phase E's
 	// CUpDownClient integration) is the ongoing owner.
 
-	if (!m_our_user_hash_set || m_create_utp_layer == nullptr ||
-	    m_lookup_by_endpoint == nullptr) {
+	if (!m_our_user_hash_set || m_create_utp_layer == nullptr) {
 		return;
 	}
 
+	// Prefer req.target_user_hash (the buddy already trusts that
+	// hash — it's the requester's identity from the rendezvous payload,
+	// and the buddy authenticated the rendezvous itself by accepting
+	// the requester as a served-buddy). Only fall back to the
+	// endpoint-lookup when target_user_hash is zero (older clients
+	// that omit it). This covers the cold-start case where the
+	// requester is a brand-new peer the endpoint has never seen
+	// before — without it, the endpoint-lookup returns NULL and the
+	// rendezvous drops silently. eMuleAI's OP_RENDEZVOUS handler in
+	// ClientUDPSocket.cpp:918+ uses the payload hash directly for
+	// the same reason.
 	std::uint8_t requester_hash[kUserHashSize];
-	if (!m_lookup_by_endpoint(req.requester_ext_ip,
-	                          req.requester_ext_port,
-	                          requester_hash)) {
-		// Unknown requester — drop.
-		return;
+	bool target_hash_nonzero = false;
+	for (std::size_t i = 0; i < kUserHashSize; ++i) {
+		if (req.target_user_hash[i] != 0) { target_hash_nonzero = true; break; }
+	}
+	if (target_hash_nonzero) {
+		std::memcpy(requester_hash, req.target_user_hash, kUserHashSize);
+	} else {
+		if (m_lookup_by_endpoint == nullptr) {
+			return;
+		}
+		if (!m_lookup_by_endpoint(req.requester_ext_ip,
+		                          req.requester_ext_port,
+		                          requester_hash)) {
+			// Unknown requester and no payload hash — drop.
+			return;
+		}
 	}
 
 	sockaddr_in addr;

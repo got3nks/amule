@@ -24,8 +24,15 @@
 
 #include <utp.h>
 
+#include "NetworkInfo.h"
 #include "UtpLayer.h"
 #include "UtpLayerRegistry.h"
+
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <random>
+#include <sys/socket.h>
 
 namespace UtpCallbacks {
 
@@ -215,6 +222,108 @@ uint64 on_get_read_buffer_size(utp_callback_arguments* a)
 	return static_cast<uint64_t>(kDefaultReadBufferSize);
 }
 
+// Monotonic clock for libutp time queries. Matches eMuleAI's
+// GetTickCount()/QueryPerformanceCounter pair semantically — RTO and
+// LEDBAT delay-sample timestamps need a monotonic source that never
+// goes backwards.
+static uint64_t MonotonicNanos()
+{
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static uint64 on_get_milliseconds(utp_callback_arguments* /*a*/)
+{
+	return MonotonicNanos() / 1000000ULL;
+}
+
+static uint64 on_get_microseconds(utp_callback_arguments* /*a*/)
+{
+	return MonotonicNanos() / 1000ULL;
+}
+
+// Family lookup helper: peer's address family decides MTU and overhead.
+// Falls back to IPv4 when the socket isn't connected yet.
+static int FamilyForCallback(utp_callback_arguments* a)
+{
+	if (a != NULL && a->socket != NULL) {
+		struct sockaddr_storage sa;
+		std::memset(&sa, 0, sizeof(sa));
+		socklen_t sl = sizeof(sa);
+		if (utp_getpeername(a->socket, (struct sockaddr*)&sa, &sl) == 0) {
+			return (sa.ss_family == AF_INET6) ? AF_INET6 : AF_INET;
+		}
+	}
+	return AF_INET;
+}
+
+static uint64 on_get_udp_mtu(utp_callback_arguments* a)
+{
+	// libutp expects the UDP-payload MTU (after IP+UDP headers stripped).
+	// Use NetworkInfo::PathMtu when we have a usable ifindex; otherwise
+	// fall back to family-aware defaults that match eMuleAI.
+	int family = FamilyForCallback(a);
+
+	if (a != NULL && a->socket != NULL) {
+		struct sockaddr_storage sa;
+		std::memset(&sa, 0, sizeof(sa));
+		socklen_t sl = sizeof(sa);
+		if (utp_getpeername(a->socket, (struct sockaddr*)&sa, &sl) == 0) {
+			uint32_t ifindex = 0;
+			uint16_t path_mtu = 0;
+			if (NetworkInfo::BestInterfaceFor(*(struct sockaddr*)&sa, sl,
+			                                  path_mtu, ifindex)
+			    && path_mtu > 0) {
+				const uint16_t overhead = (family == AF_INET6) ? 48 : 28;
+				if (path_mtu > overhead) {
+					return static_cast<uint64>(path_mtu - overhead);
+				}
+			}
+		}
+	}
+
+	// Fallback: 1500-byte Ethernet MTU (IPv4) or 1280-byte IPv6 minimum.
+	const uint16_t base_mtu  = (family == AF_INET6) ? 1280 : 1500;
+	const uint16_t overhead  = (family == AF_INET6) ? 48 : 28;
+	return static_cast<uint64>(base_mtu - overhead);
+}
+
+static uint64 on_get_udp_overhead(utp_callback_arguments* a)
+{
+	return (FamilyForCallback(a) == AF_INET6) ? 48ULL : 28ULL;
+}
+
+static uint64 on_get_random(utp_callback_arguments* /*a*/)
+{
+	static thread_local std::mt19937_64 rng{std::random_device{}()};
+	return static_cast<uint64>(rng());
+}
+
+// UTP_LOG diagnostic. Gated by AMULE_UTP_DEBUG=1 in the environment so
+// it stays silent in production runs; matches eMuleAI's pref-gated
+// DebugLog behavior in spirit.
+static uint64 on_log(utp_callback_arguments* a)
+{
+	static const bool enabled = (std::getenv("AMULE_UTP_DEBUG") != NULL);
+	if (enabled && a != NULL && a->buf != NULL && a->len > 0) {
+	}
+	return 0;
+}
+
+// LEDBAT delay-sample hook + overhead-statistics hook are no-ops in
+// eMuleAI too — they exist to prevent libutp's "callback not
+// registered" fast-return path, which is what was silently breaking
+// timing for us.
+static uint64 on_delay_sample(utp_callback_arguments* /*a*/)
+{
+	return 0;
+}
+
+static uint64 on_overhead_statistics(utp_callback_arguments* /*a*/)
+{
+	return 0;
+}
+
 } // anonymous namespace
 
 bool InstallOnContext(utp_context* ctx)
@@ -223,12 +332,28 @@ bool InstallOnContext(utp_context* ctx)
 		return false;
 	}
 
-	utp_set_callback(ctx, UTP_ON_STATE_CHANGE,      &on_state_change);
-	utp_set_callback(ctx, UTP_ON_READ,              &on_read);
-	utp_set_callback(ctx, UTP_SENDTO,               &on_sendto);
-	utp_set_callback(ctx, UTP_ON_ERROR,             &on_error);
-	utp_set_callback(ctx, UTP_GET_READ_BUFFER_SIZE, &on_get_read_buffer_size);
-	utp_set_callback(ctx, UTP_ON_ACCEPT,            &on_accept);
+	utp_set_callback(ctx, UTP_ON_STATE_CHANGE,        &on_state_change);
+	utp_set_callback(ctx, UTP_ON_READ,                &on_read);
+	utp_set_callback(ctx, UTP_SENDTO,                 &on_sendto);
+	utp_set_callback(ctx, UTP_ON_ERROR,               &on_error);
+	utp_set_callback(ctx, UTP_GET_READ_BUFFER_SIZE,   &on_get_read_buffer_size);
+	utp_set_callback(ctx, UTP_ON_ACCEPT,              &on_accept);
+
+	// Full callback set matching eMuleAI's UtpSocket.cpp:1515-1528.
+	// Without these, libutp's get-callbacks (millis, micros, mtu,
+	// overhead, random) return 0 — RTO timers fire on time=0, LEDBAT
+	// delay-sample timestamps are 0, CWND math breaks, retransmits
+	// stall the connection within a few packets. Registering even the
+	// no-op ones (delay_sample, overhead_statistics) keeps libutp out
+	// of the "callback not registered" fast-return branches.
+	utp_set_callback(ctx, UTP_GET_MILLISECONDS,       &on_get_milliseconds);
+	utp_set_callback(ctx, UTP_GET_MICROSECONDS,       &on_get_microseconds);
+	utp_set_callback(ctx, UTP_GET_UDP_MTU,            &on_get_udp_mtu);
+	utp_set_callback(ctx, UTP_GET_UDP_OVERHEAD,       &on_get_udp_overhead);
+	utp_set_callback(ctx, UTP_GET_RANDOM,             &on_get_random);
+	utp_set_callback(ctx, UTP_LOG,                    &on_log);
+	utp_set_callback(ctx, UTP_ON_DELAY_SAMPLE,        &on_delay_sample);
+	utp_set_callback(ctx, UTP_ON_OVERHEAD_STATISTICS, &on_overhead_statistics);
 
 	return true;
 }

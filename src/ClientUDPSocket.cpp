@@ -184,6 +184,9 @@ void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer,
 	uint8_t protocol = decryptedBuffer[0];
 	uint8_t opcode	 = decryptedBuffer[1];
 
+	if (ip == 0xc3e724b9u || ip == 0xb937d006u || protocol == 0xb2) {
+	}
+
 	if (packetLen >= 1) {
 		try {
 			switch (protocol) {
