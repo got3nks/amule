@@ -172,6 +172,79 @@ void CClientUDPSocket::OnReceive(int errorCode)
 }
 
 
+#ifdef ENABLE_NAT_T
+// Worker-thread synchronous hook. We claim packets whose first byte is
+// OP_UDPRESERVEDPROT2 (0xB2) — these carry uTP / NAT-T traffic and are
+// NOT eD2k-encrypted (CEncryptedDatagramSocket::DecryptReceivedClient
+// short-circuits the 0xB2 case at line ~145, returning the buffer
+// unchanged). Decoding them on the dedicated UDP worker thread skips
+// the main-thread scheduling hop entirely, so libutp's recorded
+// arrival timestamp reflects only kernel→user-space jitter (the whole
+// point of moving to Design B). Everything else returns false so the
+// existing OnPacketReceived dispatch handles it on the main thread.
+bool CClientUDPSocket::TryProcessUtpPacketSync(uint32 ip, uint16 port,
+                                                uint8_t* buffer, size_t length)
+{
+	if (length < 2 || buffer[0] != OP_UDPRESERVEDPROT2) {
+		return false;
+	}
+
+	uint8_t natSubByte = buffer[1];
+	if (natSubByte == UtpKeyFrame::kSubByte) {
+		uint8_t sender_hash[UtpKeyFrame::kUserHashSize];
+		if (UtpEncryption::UnwrapKeyFrame(buffer, length, ip, sender_hash)) {
+			CUtpLayer* layer = UtpLayerRegistry::FindByPeerHash(sender_hash);
+			if (layer != NULL) {
+				layer->OnPeerKeyFrame(sender_hash);
+			} else {
+				AddDebugLogLineN(logClientUDP, CFormat(
+					"NAT-T: Key Frame from %s — no layer registered "
+					"for that peer hash (unsolicited; dropping)")
+					% Uint32_16toStringIP_Port(ip, port));
+			}
+		} else {
+			AddDebugLogLineN(logClientUDP, CFormat(
+				"NAT-T: malformed Key Frame from %s "
+				"(rejected by UnwrapKeyFrame)")
+				% Uint32_16toStringIP_Port(ip, port));
+		}
+		return true;
+	}
+
+	if (natSubByte == UtpKeyFrame::kUtpFrameSubByte) {
+		std::vector<uint8_t> plaintext;
+		if (UtpEncryption::UnwrapUtpFrame(buffer, length, ip, plaintext)) {
+			struct sockaddr_in src;
+			std::memset(&src, 0, sizeof(src));
+			src.sin_family      = AF_INET;
+			src.sin_port        = htons(port);
+			src.sin_addr.s_addr = htonl(ip);
+			UtpEnvironment::ProcessInboundUtpPacket(
+				plaintext.data(), plaintext.size(),
+				reinterpret_cast<struct sockaddr*>(&src),
+				sizeof(src));
+		} else {
+			AddDebugLogLineN(logClientUDP, CFormat(
+				"NAT-T: malformed uTP frame from %s "
+				"(rejected by UnwrapUtpFrame)")
+				% Uint32_16toStringIP_Port(ip, port));
+		}
+		return true;
+	}
+
+	// Unknown sub-byte under OP_UDPRESERVEDPROT2 — we still claim the
+	// packet so it doesn't get a confused second-pass through
+	// OnPacketReceived's Kad / eD2k dispatch.
+	AddDebugLogLineN(logClientUDP, CFormat(
+		"NAT-T: OP_UDPRESERVEDPROT2 from %s with unknown "
+		"sub-byte 0x%02x (len=%zu) — dropping")
+		% Uint32_16toStringIP_Port(ip, port)
+		% (unsigned)natSubByte % length);
+	return true;
+}
+#endif // ENABLE_NAT_T
+
+
 void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer, size_t length)
 {
 	wxCHECK_RET(length >= 2, "Invalid packet.");
@@ -205,85 +278,17 @@ void CClientUDPSocket::OnPacketReceived(uint32 ip, uint16 port, uint8_t* buffer,
 
 #ifdef ENABLE_NAT_T
 				case OP_UDPRESERVEDPROT2:
-					// NAT-T / uTP envelope: OP_UDPRESERVEDPROT2 (0xB2)
-					// carries either a Key Frame (sub-byte 0xFF) or a
-					// uTP frame (sub-byte 0x00). Vanilla aMule peers
-					// without ENABLE_NAT_T fall through to the
-					// default "Unknown opcode" branch and drop the
-					// packet — correct interop behavior.
-					//
-					// Phase B7.5 wiring:
-					//   sub-byte 0xFF: UnwrapKeyFrame → look up the
-					//     CUtpLayer registered for the recovered
-					//     sender_hash → call layer->OnPeerKeyFrame.
-					//     If no layer is waiting (unsolicited Key
-					//     Frame), log + drop.
-					//   sub-byte 0x00: UnwrapUtpFrame → feed the
-					//     plaintext uTP packet to utp_process_udp
-					//     under RuntimeLock. libutp's internal
-					//     routing finds the matching utp_socket by
-					//     source address; the on_read / state-change
-					//     callbacks then dispatch to the layer via
-					//     utp_get_userdata.
-					if (packetLen >= 2) {
-						uint8_t natSubByte = decryptedBuffer[1];
-						if (natSubByte == UtpKeyFrame::kSubByte) {
-							uint8_t sender_hash[UtpKeyFrame::kUserHashSize];
-							if (UtpEncryption::UnwrapKeyFrame(
-									decryptedBuffer,
-									static_cast<std::size_t>(packetLen),
-									ip,
-									sender_hash)) {
-								CUtpLayer* layer = UtpLayerRegistry::FindByPeerHash(sender_hash);
-								if (layer != NULL) {
-									layer->OnPeerKeyFrame(sender_hash);
-								} else {
-									AddDebugLogLineN(logClientUDP, CFormat(
-										"NAT-T: Key Frame from %s — no layer registered "
-										"for that peer hash (unsolicited; dropping)")
-										% Uint32_16toStringIP_Port(ip, port));
-								}
-							} else {
-								AddDebugLogLineN(logClientUDP, CFormat(
-									"NAT-T: malformed Key Frame from %s "
-									"(rejected by UnwrapKeyFrame)")
-									% Uint32_16toStringIP_Port(ip, port));
-							}
-						} else if (natSubByte == UtpKeyFrame::kUtpFrameSubByte) {
-							std::vector<uint8_t> plaintext;
-							if (UtpEncryption::UnwrapUtpFrame(
-									decryptedBuffer,
-									static_cast<std::size_t>(packetLen),
-									ip,
-									plaintext)) {
-								// Build a sockaddr_in for libutp's
-								// per-connection routing (it matches
-								// inbound packets against the utp_socket's
-								// stored peer address).
-								struct sockaddr_in src;
-								std::memset(&src, 0, sizeof(src));
-								src.sin_family      = AF_INET;
-								src.sin_port        = htons(port);
-								src.sin_addr.s_addr = htonl(ip);
-
-								UtpEnvironment::ProcessInboundUtpPacket(
-									plaintext.data(), plaintext.size(),
-									reinterpret_cast<struct sockaddr*>(&src),
-									sizeof(src));
-							} else {
-								AddDebugLogLineN(logClientUDP, CFormat(
-									"NAT-T: malformed uTP frame from %s "
-									"(rejected by UnwrapUtpFrame)")
-									% Uint32_16toStringIP_Port(ip, port));
-							}
-						} else {
-							AddDebugLogLineN(logClientUDP, CFormat(
-								"NAT-T: OP_UDPRESERVEDPROT2 from %s with unknown "
-								"sub-byte 0x%02x (len=%d) — dropping")
-								% Uint32_16toStringIP_Port(ip, port)
-								% (unsigned)natSubByte % packetLen);
-						}
-					}
+					// OP_UDPRESERVEDPROT2 (0xB2) packets are claimed by
+					// TryProcessUtpPacketSync on the worker thread, so
+					// they should never reach this main-thread switch.
+					// If one does, the worker dropped it for a good
+					// reason (unknown sub-byte, malformed envelope) and
+					// already logged — fall through to the default
+					// "unknown opcode" handling to keep behavior loud.
+					AddDebugLogLineN(logClientUDP, CFormat(
+						"NAT-T: OP_UDPRESERVEDPROT2 reached main thread "
+						"(should have been claimed by worker) from %s")
+						% Uint32_16toStringIP_Port(ip, port));
 					break;
 #endif // ENABLE_NAT_T
 

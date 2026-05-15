@@ -123,6 +123,32 @@ public:
 	/** Read buffer size */
 	static const unsigned UDP_BUFFER_SIZE = 16384;
 
+public:
+	/**
+	 * Optional synchronous hook invoked by the dedicated UDP worker
+	 * thread (CAsioUDPSocketImpl::WorkerLoop) BEFORE the packet is
+	 * queued for main-thread OnReceive dispatch. Subclasses that own
+	 * a transport-layer demuxer (e.g. CClientUDPSocket dispatching
+	 * uTP / NAT-T packets to libutp) should override this to consume
+	 * those packets in the worker context — keeping libutp's LEDBAT
+	 * delay sample free of main-thread scheduling jitter.
+	 *
+	 * Returns true if the packet was fully handled (worker drops it);
+	 * returns false to let the packet flow through the regular
+	 * OnReceive → OnPacketReceived path on the main thread. The
+	 * default implementation returns false, preserving existing
+	 * behaviour for sockets that don't care.
+	 *
+	 * Threading: called on the per-socket UDP worker thread; the
+	 * implementation must take whatever locks it needs (e.g.
+	 * UtpEnvironment::RuntimeLock for libutp dispatch).
+	 */
+	virtual bool TryProcessUtpPacketSync(uint32 /* ip */, uint16 /* port */,
+	                                      uint8_t* /* buffer */, size_t /* length */)
+	{
+		return false;
+	}
+
 protected:
 	/**
 	 * This function is called when a packet has been received.

@@ -51,6 +51,20 @@ public:
 	void	SendNatTraversalRaw(const uint8_t* buf, uint32_t length, uint32_t ip, uint16_t port);
 #endif
 
+#ifdef ENABLE_NAT_T
+	/**
+	 * Worker-thread synchronous hook. Consumes uTP / NAT-T packets
+	 * (protocol byte == OP_UDPRESERVEDPROT2) before they ever reach the
+	 * main thread, so libutp's LEDBAT delay sample reflects only the
+	 * kernel→user-space jitter on the dedicated UDP recv path rather
+	 * than main-thread scheduling delay. Returns false (and lets the
+	 * packet flow through the regular OnReceive path) for everything
+	 * else — Kad, eD2k UDP control packets, etc.
+	 */
+	bool	TryProcessUtpPacketSync(uint32 ip, uint16 port,
+	                                 uint8_t* buffer, size_t length) override;
+#endif
+
 protected:
 	void	OnReceive(int errorCode) override;
 

@@ -43,6 +43,11 @@
 #include <algorithm>	// Needed for std::min - Boost up to 1.54 fails to compile with MSVC 2013 otherwise
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <thread>
 
 // Trip the compile if we accidentally pull a deprecated Asio API back in.
 #define BOOST_ASIO_NO_DEPRECATED
@@ -79,6 +84,35 @@
 using namespace boost::asio;
 using namespace boost::system;	// for error_code
 static io_context s_io_service;
+
+// Dedicated io_context for UDP sockets, driven by its own single thread.
+// Decouples kernel UDP buffer draining from the rest of the asio thread
+// pool: the dedicated asio thread does nothing but call recvfrom and
+// push the packet into a per-socket worker queue, so the kernel buffer
+// drains at line rate independent of TCP/Kad/main-thread load. A
+// matching per-socket worker thread (see CAsioUDPSocketImpl below)
+// drains the queue and either dispatches uTP packets synchronously
+// (so libutp's LEDBAT delay sample reflects only kernel→user-space
+// jitter) or hands non-uTP packets off to the main-thread queue. See
+// the producer-consumer comment in CAsioUDPSocketImpl::HandleRead.
+static io_context s_udp_io_service;
+static std::unique_ptr<executor_work_guard<io_context::executor_type>> s_udp_work_guard;
+static std::thread s_udp_thread;
+static std::once_flag s_udp_thread_once;
+
+static void EnsureUdpThreadStarted()
+{
+	std::call_once(s_udp_thread_once, [](){
+		s_udp_work_guard = std::make_unique<executor_work_guard<io_context::executor_type>>(
+			s_udp_io_service.get_executor());
+		s_udp_thread = std::thread([](){
+#ifndef __WINDOWS__
+			pthread_setname_np(pthread_self(), "aMuleUdpRecv");
+#endif
+			s_udp_io_service.run();
+		});
+	});
+}
 
 //
 // Mark a freshly-created socket close-on-exec so subprocesses launched
@@ -1107,23 +1141,62 @@ private:
 public:
 	CAsioUDPSocketImpl(const amuleIPV4Address &address, int /* flags */, CLibUDPSocket * libSocket) :
 		m_libSocket(libSocket),
-		m_strand(s_io_service),
-		m_address(address)
+		m_strand(s_udp_io_service),
+		m_address(address),
+		m_workerStop(false),
+		m_workerDrops(0)
 	{
 		m_muleSocket = NULL;
 		m_socket = NULL;
 		m_readBuffer = new char[CMuleUDPSocket::UDP_BUFFER_SIZE];
 		m_OK = true;
 		m_destroying.store(false, std::memory_order_relaxed);
-		// CreateSocket() must run after construction completes — it calls
-		// StartBackgroundRead() which captures shared_from_this(), and that
-		// requires a managing shared_ptr to already exist. The wrapper calls
-		// Init() right after make_shared.
+
+		// Drive UDP I/O on its own thread (separate from s_io_service's
+		// TCP-heavy thread pool). The asio recv-completion handler runs
+		// on this thread and does nothing but push the packet into
+		// m_workerQueue + restart async_receive_from. A dedicated worker
+		// thread (see WorkerLoop below) drains the queue and dispatches
+		// uTP packets synchronously while non-uTP packets continue to
+		// flow through the existing main-thread CMuleUDPSocket::OnReceive
+		// path. The split keeps libutp's LEDBAT one-way-delay sample
+		// reflecting only kernel→user-space jitter rather than
+		// main-thread scheduling delay. The worker thread captures a
+		// raw `this` (not shared_from_this) because its lifetime is
+		// strictly bounded by ~CAsioUDPSocketImpl, which joins the
+		// thread before any member is destroyed.
+		EnsureUdpThreadStarted();
+		m_workerThread = std::thread([this](){
+#ifndef __WINDOWS__
+			pthread_setname_np(pthread_self(), "aMuleUdpWork");
+#endif
+			WorkerLoop();
+		});
+
+		// CreateSocket() must run after construction completes — it
+		// calls StartBackgroundRead() which captures shared_from_this(),
+		// and that requires a managing shared_ptr to already exist.
+		// The wrapper calls Init() right after make_shared.
 	}
 
 	~CAsioUDPSocketImpl()
 	{
 		AddDebugLogLineF(logAsio, "UDP ~CAsioUDPSocketImpl");
+		// Signal the worker thread to stop and join before tearing down
+		// state it might still touch (m_muleSocket, m_receiveBuffers).
+		{
+			std::lock_guard<std::mutex> lk(m_workerQueueMutex);
+			m_workerStop = true;
+		}
+		m_workerQueueCV.notify_all();
+		if (m_workerThread.joinable()) {
+			m_workerThread.join();
+		}
+		// Drain any packets the worker didn't get to.
+		while (!m_workerQueue.empty()) {
+			delete m_workerQueue.front();
+			m_workerQueue.pop();
+		}
 		delete m_socket;
 		delete[] m_readBuffer;
 		DeleteContents(m_receiveBuffers);
@@ -1295,6 +1368,12 @@ private:
 
 	void HandleRead(const error_code & ec, size_t received)
 	{
+		// Design B producer side: this runs on the dedicated UDP asio
+		// thread. We do the MINIMUM work to get the packet off the
+		// kernel buffer (copy into a CUDPData, push to the worker
+		// queue) and immediately restart async_receive_from so the
+		// kernel keeps draining at line rate. The worker thread
+		// (WorkerLoop below) does the actual decode + dispatch.
 		if (ec) {
 			AddDebugLogLineN(logAsio, CFormat("UDP HandleReadError %s") % ec.message());
 		} else if (received == 0) {
@@ -1302,19 +1381,82 @@ private:
 		} else if (m_muleSocket == NULL) {
 			AddDebugLogLineN(logAsio, "UDP HandleReadError no handler");
 		} else {
-
 			amuleIPV4Address ipadr = amuleIPV4Address(CamuleIPV4Endpoint(m_receiveEndpoint));
-			AddDebugLogLineF(logAsio, CFormat("UDP HandleRead %d %s:%d") % received % ipadr.IPAddress() % ipadr.Service());
-
-			// create our read buffer
 			CUDPData * recdata = new CUDPData(m_readBuffer, received, ipadr);
+			bool pushed = false;
 			{
-				wxMutexLocker lock(m_receiveBuffersLock);
-				m_receiveBuffers.push_back(recdata);
+				std::lock_guard<std::mutex> lk(m_workerQueueMutex);
+				if (m_workerQueue.size() < kMaxWorkerQueueDepth) {
+					m_workerQueue.push(recdata);
+					pushed = true;
+				}
 			}
-			CoreNotify_UDPSocketReceive(m_muleSocket);
+			if (pushed) {
+				m_workerQueueCV.notify_one();
+			} else {
+				delete recdata;
+				++m_workerDrops;
+				// Log at most occasionally so a sustained overflow
+				// doesn't spam the log. The counter is the real metric.
+				if ((m_workerDrops & 0xFF) == 1) {
+					AddLogLineNS(CFormat("UDP worker queue full — dropped %u packets cumulative")
+						% m_workerDrops.load());
+				}
+			}
 		}
 		StartBackgroundRead();
+	}
+
+	// Worker thread main loop. Drains m_workerQueue and dispatches each
+	// packet: uTP/NAT-T packets are handled synchronously here via the
+	// CMuleUDPSocket::TryProcessUtpPacketSync hook; everything else is
+	// requeued onto m_receiveBuffers for the main-thread OnReceive path.
+	void WorkerLoop()
+	{
+		while (true) {
+			CUDPData * pkt = NULL;
+			{
+				std::unique_lock<std::mutex> lk(m_workerQueueMutex);
+				m_workerQueueCV.wait(lk, [this]() {
+					return !m_workerQueue.empty() || m_workerStop;
+				});
+				if (m_workerStop && m_workerQueue.empty()) {
+					return;
+				}
+				pkt = m_workerQueue.front();
+				m_workerQueue.pop();
+			}
+
+			// Sync hook for transport-layer packets (uTP / NAT-T Key
+			// Frames). Returns true if the packet was consumed here;
+			// false means it's something the main thread needs to
+			// handle (Kad, eD2k UDP control packets, etc.).
+			bool handled = false;
+			if (m_muleSocket != NULL) {
+				const uint32 ip   = StringIPtoUint32(pkt->ipadr.IPAddress());
+				const uint16 port = pkt->ipadr.Service();
+				handled = m_muleSocket->TryProcessUtpPacketSync(
+					ip, port,
+					reinterpret_cast<uint8_t*>(pkt->buffer),
+					pkt->size);
+			}
+
+			if (handled) {
+				delete pkt;
+			} else {
+				// Fall through to the main thread's existing
+				// OnReceive → OnPacketReceived flow.
+				{
+					wxMutexLocker lock(m_receiveBuffersLock);
+					m_receiveBuffers.push_back(pkt);
+				}
+				if (m_muleSocket != NULL) {
+					CoreNotify_UDPSocketReceive(m_muleSocket);
+				} else {
+					delete pkt;
+				}
+			}
+		}
 	}
 
 	void HandleSendTo(const error_code & ec, size_t sent, CUDPData * recdata)
@@ -1346,7 +1488,7 @@ private:
 			// before bind, matching the TCP acceptor path. Single-arg
 			// ctor + open() is the documented Asio idiom for "create
 			// without binding".
-			m_socket = new ip::udp::socket(s_io_service);
+			m_socket = new ip::udp::socket(s_udp_io_service);
 			m_socket->open(endpoint.protocol());
 			SetCloexecOnSocket(m_socket->native_handle());
 			m_socket->bind(endpoint);
@@ -1394,6 +1536,22 @@ private:
 
 	// Address of last reception
 	ip::udp::endpoint	m_receiveEndpoint;
+
+	// Design B producer-consumer state. m_workerQueue is filled by the
+	// asio recv thread (HandleRead) and drained by m_workerThread
+	// (WorkerLoop). kMaxWorkerQueueDepth caps memory under sustained
+	// overflow — at 8192 entries × ~1500 byte avg packet that's
+	// ~12 MiB worst case, plenty for the 5400-or-so packets a 8 MiB
+	// kernel SO_RCVBUF could feed us. m_workerDrops counts entries
+	// rejected because the queue was full; non-zero values indicate
+	// the worker is falling behind and need investigation.
+	static constexpr size_t        kMaxWorkerQueueDepth = 8192;
+	std::thread                    m_workerThread;
+	std::mutex                     m_workerQueueMutex;
+	std::condition_variable        m_workerQueueCV;
+	std::queue<CUDPData *>         m_workerQueue;
+	std::atomic<bool>              m_workerStop;
+	std::atomic<unsigned>          m_workerDrops;
 };
 
 
@@ -1522,6 +1680,19 @@ void CAsioService::Stop()
 	}
 	delete[] m_threads;
 	m_threads = 0;
+
+	// Release the UDP-dedicated io_context. Drop the work_guard
+	// (lets run() return when the queue drains) and join the
+	// dedicated thread. If the worker thread was never started
+	// (no UDP socket ever created), s_udp_thread is unjoinable
+	// and the joinable() check makes this a no-op.
+	if (s_udp_work_guard) {
+		s_udp_work_guard.reset();
+		s_udp_io_service.stop();
+	}
+	if (s_udp_thread.joinable()) {
+		s_udp_thread.join();
+	}
 }
 
 
