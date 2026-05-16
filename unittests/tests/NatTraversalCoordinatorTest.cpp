@@ -741,6 +741,14 @@ void teardown_d4_mocks()
 // true) → endpoint looks up requester by ext_endpoint, creates a
 // passive CUtpLayer (initiator=false) keyed to requester's hash and
 // requester's ext_endpoint.
+//
+// This exercises the lookup-by-endpoint fallback path (req.target_user_hash
+// all-zero). Post-commit e80a46ee3, the endpoint prefers a non-zero
+// req.target_user_hash as the requester's identity (cold-start case
+// where the endpoint has never heard of the requester); the fallback
+// fires only when target_user_hash is the zero buffer. The
+// payload-direct path is covered by EndpointPrefersPayloadHashOverLookup
+// below.
 TEST(NatTraversalCoordinator, EndpointReceivesForwardedRendezvousCreatesPassiveLayer)
 {
 	install_d4_mocks();
@@ -754,12 +762,12 @@ TEST(NatTraversalCoordinator, EndpointReceivesForwardedRendezvousCreatesPassiveL
 	}
 	g_known_endpoints[std::make_pair(ip_r, port_r)] = hash_r;
 
-	// Buddy-forwarded RENDEZVOUS: target_user_hash = ours,
-	// has_ext_endpoint = true, ext_endpoint = R's external address.
+	// Buddy-forwarded RENDEZVOUS with target_user_hash left zero so
+	// the endpoint exercises the lookup-by-endpoint fallback.
 	std::uint8_t our_hash[NatTraversal::kUserHashSize];
 	fill_hash(our_hash, 0x77);   // matches install_d4_mocks
 	NatTraversal::RendezvousRequest req;
-	std::memcpy(req.target_user_hash, our_hash, sizeof(our_hash));
+	std::memset(req.target_user_hash, 0, sizeof(req.target_user_hash));
 	req.connect_options    = 0;
 	req.has_file_hash      = false;
 	req.has_ext_endpoint   = true;
@@ -800,18 +808,18 @@ TEST(NatTraversalCoordinator, EndpointReceivesForwardedRendezvousCreatesPassiveL
 
 
 // If the endpoint doesn't recognise the requester (no entry in the
-// lookup table), the layer is NOT created — the rendezvous fails
-// silently and the requester's incoming uTP will be rejected at
-// libutp's on_accept stage.
+// lookup table) AND target_user_hash is the zero buffer, the layer
+// is NOT created — the rendezvous fails silently and the requester's
+// incoming uTP will be rejected at libutp's on_accept stage. The
+// non-zero payload-hash fallback covers the cold-start case
+// separately (see EndpointPrefersPayloadHashOverLookup).
 TEST(NatTraversalCoordinator, EndpointDropsRendezvousFromUnknownRequester)
 {
 	install_d4_mocks();
 	// Deliberately empty g_known_endpoints — lookup will fail.
 
-	std::uint8_t our_hash[NatTraversal::kUserHashSize];
-	fill_hash(our_hash, 0x77);
 	NatTraversal::RendezvousRequest req;
-	std::memcpy(req.target_user_hash, our_hash, sizeof(our_hash));
+	std::memset(req.target_user_hash, 0, sizeof(req.target_user_hash));
 	req.connect_options    = 0;
 	req.has_file_hash      = false;
 	req.has_ext_endpoint   = true;
@@ -822,6 +830,50 @@ TEST(NatTraversalCoordinator, EndpointDropsRendezvousFromUnknownRequester)
 	coord.OnInboundRendezvous(req, 0xDEADBEEFu, 4242);
 
 	ASSERT_EQUALS(0, g_create_layer_capture.call_count);
+
+	teardown_d4_mocks();
+}
+
+
+// Post-#e80a46ee3 cold-start handling: when a buddy forwards a
+// rendezvous naming a requester the endpoint has never seen, the
+// endpoint-lookup table is empty — but the rendezvous payload itself
+// carries the requester's hash in target_user_hash. The endpoint
+// prefers that hash so the passive CUtpLayer can still be created
+// (the alternative would be a silent drop on every cold-start uTP
+// connection).
+TEST(NatTraversalCoordinator, EndpointPrefersPayloadHashOverLookup)
+{
+	install_d4_mocks();
+	// Deliberately empty g_known_endpoints — fallback would fail.
+
+	// Requester's hash carried in the rendezvous payload directly.
+	std::uint8_t requester_hash[NatTraversal::kUserHashSize];
+	fill_hash(requester_hash, 0x44);
+	const std::uint32_t ip_r = 0x05060708u;
+	const std::uint16_t port_r = 23456;
+
+	NatTraversal::RendezvousRequest req;
+	std::memcpy(req.target_user_hash, requester_hash, sizeof(requester_hash));
+	req.connect_options    = 0;
+	req.has_file_hash      = false;
+	req.has_ext_endpoint   = true;
+	req.requester_ext_ip   = ip_r;
+	req.requester_ext_port = port_r;
+
+	auto& coord = CNatTraversalCoordinator::Instance();
+	coord.OnInboundRendezvous(req, 0xDEADBEEFu, 4242);
+
+	ASSERT_EQUALS(1, g_create_layer_capture.call_count);
+	for (std::size_t i = 0; i < NatTraversal::kUserHashSize; ++i) {
+		ASSERT_EQUALS((int)requester_hash[i],
+		              (int)g_create_layer_capture.last_peer_hash[i]);
+	}
+	ASSERT_EQUALS((unsigned long)ip_r,
+	              (unsigned long)g_create_layer_capture.last_peer_ip);
+	ASSERT_EQUALS((int)port_r,
+	              (int)g_create_layer_capture.last_peer_port);
+	ASSERT_FALSE(g_create_layer_capture.last_initiator);
 
 	teardown_d4_mocks();
 }

@@ -33,6 +33,7 @@
 #include <muleunit/test.h>
 
 #include "UtpLayer.h"
+#include "UdpReceiveBufferStat.h"
 
 #ifdef ENABLE_NAT_T
 
@@ -167,6 +168,80 @@ TEST(UtpLayer, DataAvailableCallbackFiresPerOnRead)
 	utp_destroy(ctx);
 }
 
+// Bug #4 (post-D6, commit e80a46ee3): Recv() must re-fire the
+// data-available callback when bytes still remain in the read buffer
+// after the pop. eD2k's CEMSocket::OnReceive do-while exits after
+// one complete packet (pendingHeaderSize resets to zero), so multi-
+// packet uTP frames need the caller re-entered or the residual
+// stays stuck until the next OnRead. Verified by observing that the
+// callback fires from inside Recv when (and only when) m_readBuf is
+// non-empty afterwards.
+TEST(UtpLayer, RecvReFiresDataAvailableCallbackWhenBytesRemain)
+{
+	utp_context* ctx = utp_init(2);
+	ASSERT_TRUE(ctx != NULL);
+
+	{
+		CUtpLayer layer(ctx);
+
+		int call_count = 0;
+		layer.SetDataAvailableCallback([&call_count]() { ++call_count; });
+
+		// Single OnRead delivers 8 bytes — first callback fires.
+		const std::uint8_t data[] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+		layer.OnRead(data, sizeof(data));
+		ASSERT_EQUALS(1, call_count);
+
+		// Recv 4 of 8 bytes — readBuf still has 4 → callback re-fires.
+		std::uint8_t out[8] = {0};
+		std::int64_t got = layer.Recv(out, 4);
+		ASSERT_EQUALS((std::int64_t)4, got);
+		ASSERT_EQUALS(2, call_count);
+
+		// Recv remaining 4 — readBuf now empty → no callback fire.
+		got = layer.Recv(out, 4);
+		ASSERT_EQUALS((std::int64_t)4, got);
+		ASSERT_EQUALS(2, call_count);
+
+		// Recv on an empty buffer is also a no-op for the callback.
+		got = layer.Recv(out, 4);
+		ASSERT_EQUALS((std::int64_t)0, got);
+		ASSERT_EQUALS(2, call_count);
+	}
+
+	utp_destroy(ctx);
+}
+
+
+// Bug #4 corollary: when no callback is installed, the residual-bytes
+// path of Recv still drains correctly — the "fire if set" branch
+// must not assume the callback is present.
+TEST(UtpLayer, RecvWithoutCallbackHandlesResidualGracefully)
+{
+	utp_context* ctx = utp_init(2);
+	ASSERT_TRUE(ctx != NULL);
+
+	{
+		CUtpLayer layer(ctx);
+		// No SetDataAvailableCallback call — m_data_available_cb is NULL.
+
+		const std::uint8_t data[] = { 0xA, 0xB, 0xC, 0xD };
+		layer.OnRead(data, sizeof(data));
+
+		std::uint8_t out[2] = {0};
+		std::int64_t got = layer.Recv(out, 2);
+		ASSERT_EQUALS((std::int64_t)2, got);
+		ASSERT_EQUALS((std::size_t)2, layer.ReadBufferSize());
+		// No crash from a NULL callback path — buffer is still drainable.
+		got = layer.Recv(out, 2);
+		ASSERT_EQUALS((std::int64_t)2, got);
+		ASSERT_EQUALS((std::size_t)0, layer.ReadBufferSize());
+	}
+
+	utp_destroy(ctx);
+}
+
+
 // Phase E3: SetDataAvailableCallback(nullptr) detaches a previously
 // registered callback — useful for teardown when the owning socket
 // goes away before the layer (production: detach before deleting
@@ -275,22 +350,138 @@ TEST(UtpLayer, OnStateChangeDestroyingMarksClosed)
 }
 
 
-// OnGetReadBufferSize reflects remaining capacity, not the constant
-// total. Important because libutp's flow control reads this every
-// time it considers delivering more bytes.
-TEST(UtpLayer, OnGetReadBufferSizeShrinksAsBufferFills)
+// OnGetReadBufferSize reports bytes-in-buffer (NOT free space).
+// libutp's UTP_GET_READ_BUFFER_SIZE contract is "bytes currently
+// queued in the app's receive buffer": libutp computes its own
+// advertised window as max(0, opt_rcvbuf - returned_value) at
+// utp_internal.cpp:595. Returning free-space here would make libutp
+// treat a 64 KiB free buffer as if 64 KiB were already queued, and
+// (post-Bug #6 always-copy) returning capacity - size() could
+// underflow size_t once the soft cap is exceeded, hitting libutp's
+// `(int)numbuf >= 0` assertion at utp_internal.cpp:594.
+TEST(UtpLayer, OnGetReadBufferSizeReportsBytesInBuffer)
 {
 	utp_context* ctx = utp_init(2);
 	ASSERT_TRUE(ctx != NULL);
 
 	{
 		CUtpLayer layer(ctx);
-		ASSERT_EQUALS(CUtpLayer::kReadBufferCapacity,
-		              layer.OnGetReadBufferSize());
+		ASSERT_EQUALS((std::size_t)0, layer.OnGetReadBufferSize());
 
 		std::vector<std::uint8_t> data(1024, 0xEE);
 		layer.OnRead(data.data(), data.size());
-		ASSERT_EQUALS(CUtpLayer::kReadBufferCapacity - 1024,
+		ASSERT_EQUALS((std::size_t)1024, layer.OnGetReadBufferSize());
+
+		layer.OnRead(data.data(), data.size());
+		ASSERT_EQUALS((std::size_t)2048, layer.OnGetReadBufferSize());
+
+		// Draining the app-side buffer shrinks the reported count.
+		std::vector<std::uint8_t> out(512);
+		std::int64_t got = layer.Recv(out.data(), out.size());
+		ASSERT_EQUALS((std::int64_t)512, got);
+		ASSERT_EQUALS((std::size_t)1536, layer.OnGetReadBufferSize());
+	}
+
+	utp_destroy(ctx);
+}
+
+
+// Bug #8 regression: ClampAdaptiveRcvBuf must clamp the kernel-reported
+// SO_RCVBUF into [kUtpRecvBufferFloor, kUtpRecvBufferCeiling]. This is
+// the policy that prevents libutp from advertising a receive window the
+// kernel can't back (root cause of the LEDBAT CWND collapse seen in the
+// 1 GiB soak — peer over-sent, kernel silently dropped, libutp read the
+// missing ACKs as queueing delay and shrank CWND to zero permanently).
+TEST(UtpLayer, ClampAdaptiveRcvBufFloorWhenKernelUnpublished)
+{
+	// SetUdpKernelRecvBufferBytes never called → returns 0 → floor.
+	ASSERT_EQUALS(CUtpLayer::kUtpRecvBufferFloor,
+	              CUtpLayer::ClampAdaptiveRcvBuf(0));
+}
+
+TEST(UtpLayer, ClampAdaptiveRcvBufFloorOnTinyKernelValue)
+{
+	// Stock Linux net.core.rmem_default is ~208 KiB, which sits
+	// above the 64 KiB floor — but a misconfigured host with a
+	// tiny default would still get the floor.
+	ASSERT_EQUALS(CUtpLayer::kUtpRecvBufferFloor,
+	              CUtpLayer::ClampAdaptiveRcvBuf(8 * 1024));
+}
+
+TEST(UtpLayer, ClampAdaptiveRcvBufPassesThroughTypicalLinuxDefault)
+{
+	// 208 KiB is between floor (64 KiB) and ceiling (4 MiB) →
+	// passes through unchanged.
+	const std::size_t k208KiB = 208 * 1024;
+	ASSERT_EQUALS(k208KiB, CUtpLayer::ClampAdaptiveRcvBuf(k208KiB));
+}
+
+TEST(UtpLayer, ClampAdaptiveRcvBufCeilingOnSysctlTunedHost)
+{
+	// A host with net.core.rmem_max bumped to 16 MiB still gets
+	// capped at 4 MiB — beyond that, the per-connection memory
+	// cost outweighs the throughput benefit on aMule's typical
+	// "handful of NAT-T peers" workload.
+	const std::size_t k16MiB = 16 * 1024 * 1024;
+	ASSERT_EQUALS(CUtpLayer::kUtpRecvBufferCeiling,
+	              CUtpLayer::ClampAdaptiveRcvBuf(k16MiB));
+}
+
+TEST(UtpLayer, ClampAdaptiveRcvBufBoundaryExact)
+{
+	// Exact floor and exact ceiling pass through unchanged
+	// (clamp is inclusive on both ends).
+	ASSERT_EQUALS(CUtpLayer::kUtpRecvBufferFloor,
+	              CUtpLayer::ClampAdaptiveRcvBuf(CUtpLayer::kUtpRecvBufferFloor));
+	ASSERT_EQUALS(CUtpLayer::kUtpRecvBufferCeiling,
+	              CUtpLayer::ClampAdaptiveRcvBuf(CUtpLayer::kUtpRecvBufferCeiling));
+}
+
+
+// UdpReceiveBufferStat — the shared atomic that LibSocketAsio's
+// CreateSocket publishes the kernel's actual SO_RCVBUF readback through,
+// for CUtpLayer to consume in ApplySocketBuffersLocked. Verifies the
+// trivial set/get round-trip and the "never set" → 0 contract.
+TEST(UtpLayer, UdpReceiveBufferStatRoundTrip)
+{
+	const std::size_t kProbe = 1234567u;
+	SetUdpKernelRecvBufferBytes(kProbe);
+	ASSERT_EQUALS(kProbe, GetUdpKernelRecvBufferBytes());
+	// Overwrite — last write wins.
+	SetUdpKernelRecvBufferBytes(0);
+	ASSERT_EQUALS((std::size_t)0, GetUdpKernelRecvBufferBytes());
+}
+
+
+// Bug #6 regression: OnRead must copy every byte even when the
+// resulting buffer would exceed kReadBufferCapacity. libutp's
+// on_read pointer is ephemeral (utp_internal.cpp:2351) — silently
+// dropping bytes there causes an eD2k stream desync the OP_*
+// parser observes as ERR_TOOBIG. Flow control is enforced *via*
+// OnGetReadBufferSize (which causes the peer to advertise window=0),
+// not via dropping at the boundary.
+TEST(UtpLayer, OnReadAlwaysCopiesEvenPastSoftCap)
+{
+	utp_context* ctx = utp_init(2);
+	ASSERT_TRUE(ctx != NULL);
+
+	{
+		CUtpLayer layer(ctx);
+
+		// Fill the buffer right up to the soft cap.
+		std::vector<std::uint8_t> at_cap(CUtpLayer::kReadBufferCapacity, 0xAA);
+		layer.OnRead(at_cap.data(), at_cap.size());
+		ASSERT_EQUALS(CUtpLayer::kReadBufferCapacity, layer.ReadBufferSize());
+
+		// One more delivery past the cap — must still be copied.
+		const std::size_t kOver = 16 * 1024;
+		std::vector<std::uint8_t> over(kOver, 0xBB);
+		layer.OnRead(over.data(), over.size());
+		ASSERT_EQUALS(CUtpLayer::kReadBufferCapacity + kOver,
+		              layer.ReadBufferSize());
+
+		// And OnGetReadBufferSize must NOT underflow.
+		ASSERT_EQUALS(CUtpLayer::kReadBufferCapacity + kOver,
 		              layer.OnGetReadBufferSize());
 	}
 

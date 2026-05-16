@@ -557,11 +557,15 @@ TEST(NatTraversalIntegration, BuddyWithoutEndpointKnowledgeTimesOut)
 // lookup (no prior source-exchange / Kad publish): endpoint's
 // CreateUtpLayer is NOT invoked. The buddy already emitted
 // HOLEPUNCH to the requester before the forward outcome was known
-// on the endpoint side, so the requester DOES complete its
-// rendezvous and creates its own active layer — but the endpoint
-// won't be ready for the SYN, so libutp's on_accept rejects.
-// (This is the documented graceful-degradation behavior from D4.)
-TEST(NatTraversalIntegration, EndpointDropsUnknownRequester)
+// Cold-start handling: the endpoint may receive a rendezvous from a
+// buddy referencing a requester it has never seen before
+// (endpoint->known_by_endpoint empty). Post-#e80a46ee3 the endpoint
+// still creates a passive layer using the requester's hash carried
+// in the rendezvous payload's target_user_hash — without this
+// fallback, every first-contact NAT-T rendezvous would drop silently.
+// Both layers are wired up; libutp's on_accept then matches the
+// initiator's SYN to the responder's layer by peer_addr.
+TEST(NatTraversalIntegration, EndpointAcceptsUnknownRequesterViaPayloadHash)
 {
 	reset_globals();
 
@@ -581,7 +585,7 @@ TEST(NatTraversalIntegration, EndpointDropsUnknownRequester)
 
 	buddy->known_by_hash[endpoint_hash] = endpoint->addr;
 	// NOTE: endpoint->known_by_endpoint is empty — endpoint doesn't
-	// recognise the requester.
+	// recognise the requester via the address-keyed lookup.
 
 	set_buddy_for(requester.get(), buddy->addr);
 
@@ -606,12 +610,22 @@ TEST(NatTraversalIntegration, EndpointDropsUnknownRequester)
 	ASSERT_TRUE(success.load());
 	ASSERT_TRUE(received_layer.load() != nullptr);
 
-	// But only ONE factory call — the requester's active layer.
-	// Endpoint's passive-layer factory was NOT invoked because the
-	// endpoint's lookup-by-endpoint delegate returned false.
-	ASSERT_EQUALS((std::size_t)1, g_factory_calls.size());
-	ASSERT_TRUE(g_factory_calls[0].initiator);
-	ASSERT_EQUALS((std::uint32_t)0x0E000003u, g_factory_calls[0].peer_ip_host);
+	// Two factory calls: the requester's active layer plus the
+	// endpoint's passive layer (built from the payload hash).
+	ASSERT_EQUALS((std::size_t)2, g_factory_calls.size());
+	bool seen_initiator = false;
+	bool seen_responder = false;
+	for (const auto& fc : g_factory_calls) {
+		if (fc.initiator) {
+			seen_initiator = true;
+			ASSERT_EQUALS((std::uint32_t)0x0E000003u, fc.peer_ip_host);
+		} else {
+			seen_responder = true;
+			ASSERT_EQUALS((std::uint32_t)0x0E000001u, fc.peer_ip_host);
+		}
+	}
+	ASSERT_TRUE(seen_initiator);
+	ASSERT_TRUE(seen_responder);
 }
 
 #else // ENABLE_NAT_T
