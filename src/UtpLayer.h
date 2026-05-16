@@ -284,6 +284,16 @@ public:
 	void OnError(int error_code);
 	std::size_t OnGetReadBufferSize() const;
 
+	// Adaptive UTP_RCVBUF policy: clamp the kernel-reported SO_RCVBUF
+	// value into [kUtpRecvBufferFloor, kUtpRecvBufferCeiling]. A zero
+	// input means "kernel buffer not published yet" and yields the
+	// floor. Exposed as a static helper so the sizing decision can be
+	// unit-tested without bringing up a real utp_socket.
+	static constexpr std::size_t kUtpRecvBufferFloor    = 64 * 1024;
+	static constexpr std::size_t kUtpRecvBufferCeiling  = 4 * 1024 * 1024;
+	static constexpr std::size_t kUtpSendBufferBytes    = 4 * 1024 * 1024;
+	static std::size_t ClampAdaptiveRcvBuf(std::size_t kernel_rcvbuf);
+
 private:
 	// Drain the write buffer through utp_write while libutp has CWND
 	// room. Caller holds RuntimeLock.

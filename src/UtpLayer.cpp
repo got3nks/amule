@@ -33,12 +33,12 @@
 #include <cstring>
 #include <mutex>
 
-// Defined in LibSocketAsio.cpp. Reports the most-recently-observed
-// kernel-allocated SO_RCVBUF (bytes) on the UDP socket. Used here to
-// size libutp's per-connection UTP_RCVBUF so we don't advertise a
-// receive window the kernel can't actually back. Returns 0 if no UDP
-// socket has been created yet.
-std::size_t GetUdpKernelRecvBufferBytes();
+// Adaptive sizing of libutp's UTP_RCVBUF based on the kernel-allocated
+// SO_RCVBUF on aMule's UDP socket. The producer side
+// (CAsioUDPSocketImpl::CreateSocket) publishes the value to
+// UdpReceiveBufferStat. Splitting this into its own TU keeps the unit
+// tests for CUtpLayer from having to drag in boost::asio.
+#include "UdpReceiveBufferStat.h"
 
 // Out-of-class definitions for the constexpr static members.
 // Required pre-C++17 when these are ODR-used (e.g. binding to a
@@ -48,6 +48,9 @@ constexpr std::size_t   CUtpLayer::kWriteBufferCapacity;
 constexpr std::size_t   CUtpLayer::kReadBufferCapacity;
 constexpr std::size_t   CUtpLayer::kUserHashSize;
 constexpr std::uint64_t CUtpLayer::kKeyFrameTimeoutMs;
+constexpr std::size_t   CUtpLayer::kUtpRecvBufferFloor;
+constexpr std::size_t   CUtpLayer::kUtpRecvBufferCeiling;
+constexpr std::size_t   CUtpLayer::kUtpSendBufferBytes;
 
 CUtpLayer::CUtpLayer(utp_context* ctx)
 	: m_ctx(ctx)
@@ -618,19 +621,21 @@ void CUtpLayer::ApplySocketBuffersLocked()
 	if (m_socket == NULL) {
 		return;
 	}
-	constexpr std::size_t kUtpSendBufferBytes = 4 * 1024 * 1024;
-	constexpr std::size_t kUtpRecvBufferCeiling = 4 * 1024 * 1024;
-	constexpr std::size_t kUtpRecvBufferFloor = 64 * 1024;
-	const std::size_t kernel_rcvbuf = GetUdpKernelRecvBufferBytes();
-	std::size_t utp_rcvbuf = kernel_rcvbuf;
-	if (utp_rcvbuf == 0 || utp_rcvbuf < kUtpRecvBufferFloor) {
-		utp_rcvbuf = kUtpRecvBufferFloor;
-	}
-	if (utp_rcvbuf > kUtpRecvBufferCeiling) {
-		utp_rcvbuf = kUtpRecvBufferCeiling;
-	}
+	const std::size_t utp_rcvbuf = ClampAdaptiveRcvBuf(
+		GetUdpKernelRecvBufferBytes());
 	utp_setsockopt(m_socket, UTP_RCVBUF, static_cast<int>(utp_rcvbuf));
 	utp_setsockopt(m_socket, UTP_SNDBUF, static_cast<int>(kUtpSendBufferBytes));
+}
+
+std::size_t CUtpLayer::ClampAdaptiveRcvBuf(std::size_t kernel_rcvbuf)
+{
+	if (kernel_rcvbuf < kUtpRecvBufferFloor) {
+		return kUtpRecvBufferFloor;
+	}
+	if (kernel_rcvbuf > kUtpRecvBufferCeiling) {
+		return kUtpRecvBufferCeiling;
+	}
+	return kernel_rcvbuf;
 }
 
 #endif // ENABLE_NAT_T

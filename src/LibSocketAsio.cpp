@@ -114,20 +114,13 @@ static void EnsureUdpThreadStarted()
 	});
 }
 
-// Actual kernel-allocated SO_RCVBUF (in bytes) on the most-recently-created
-// UDP socket. Published by CAsioUDPSocketImpl::CreateSocket so other code
-// — specifically CUtpLayer::ApplySocketBuffersLocked — can size its
-// per-connection libutp receive window to fit the kernel buffer instead
-// of advertising a window the kernel can't actually back. Linux silently
-// caps SO_RCVBUF at net.core.rmem_max, and getsockopt returns the
-// effective allocation (typically 2× the requested value, the kernel
-// uses half for metadata). Zero means "no UDP socket created yet" — in
-// that case callers should fall back to a sensible default.
-static std::atomic<std::size_t> s_udp_actual_rcvbuf{0};
-std::size_t GetUdpKernelRecvBufferBytes()
-{
-	return s_udp_actual_rcvbuf.load(std::memory_order_relaxed);
-}
+// Actual kernel-allocated SO_RCVBUF (bytes) is published to
+// UdpReceiveBufferStat via SetUdpKernelRecvBufferBytes() from
+// CAsioUDPSocketImpl::CreateSocket. Consumers (specifically
+// CUtpLayer::ApplySocketBuffersLocked) read it via the getter declared
+// in UdpReceiveBufferStat.h. Splitting the accessor into its own TU
+// lets CUtpLayer's unit tests link without dragging in boost::asio.
+#include "UdpReceiveBufferStat.h"
 
 //
 // Mark a freshly-created socket close-on-exec so subprocesses launched
@@ -1562,9 +1555,7 @@ private:
 			// causes LEDBAT CWND collapse + stall (peer over-sends,
 			// kernel drops, libutp interprets as congestion).
 			if (actual_rcv.value() > 0) {
-				s_udp_actual_rcvbuf.store(
-					static_cast<std::size_t>(actual_rcv.value()),
-					std::memory_order_relaxed);
+				SetUdpKernelRecvBufferBytes(static_cast<std::size_t>(actual_rcv.value()));
 			}
 			AddLogLineN(
 				CFormat(_("UDP receive buffer: requested 4 MiB, kernel granted %d bytes "
