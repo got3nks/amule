@@ -744,6 +744,13 @@ endif()
 IF (NEED_LIB_MULESOCKET)
 	add_library (mulesocket STATIC
 		LibSocket.cpp
+		# LibSocket.cpp transitively #includes LibSocketAsio.cpp on
+		# ENABLE_BOOST builds, which publishes the kernel-allocated
+		# SO_RCVBUF readback through SetUdpKernelRecvBufferBytes.
+		# Build the publisher TU here so every binary that links
+		# mulesocket (amuled, amulecmd, amulegui, amuleweb…) gets
+		# the symbol — placing it in CORE_SOURCES misses amulecmd.
+		UdpReceiveBufferStat.cpp
 	)
 
 	target_compile_definitions (mulesocket

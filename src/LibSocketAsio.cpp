@@ -106,7 +106,12 @@ static void EnsureUdpThreadStarted()
 		s_udp_work_guard = std::make_unique<executor_work_guard<io_context::executor_type>>(
 			s_udp_io_service.get_executor());
 		s_udp_thread = std::thread([](){
-#ifndef __WINDOWS__
+#if defined(__APPLE__)
+			// Darwin's pthread_setname_np takes the name only — it
+			// names the calling thread. The 2-arg signature is
+			// Linux-only.
+			pthread_setname_np("aMuleUdpRecv");
+#elif !defined(__WINDOWS__)
 			pthread_setname_np(pthread_self(), "aMuleUdpRecv");
 #endif
 			s_udp_io_service.run();
@@ -1175,7 +1180,9 @@ public:
 		// thread before any member is destroyed.
 		EnsureUdpThreadStarted();
 		m_workerThread = std::thread([this](){
-#ifndef __WINDOWS__
+#if defined(__APPLE__)
+			pthread_setname_np("aMuleUdpWork");
+#elif !defined(__WINDOWS__)
 			pthread_setname_np(pthread_self(), "aMuleUdpWork");
 #endif
 			WorkerLoop();

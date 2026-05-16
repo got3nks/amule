@@ -68,8 +68,15 @@ uint16_t PathMtu(uint32_t ifindex)
 	}
 
 	int mtu = req.ifr_mtu;
-	if (mtu <= 0 || mtu > 65535) {
+	if (mtu <= 0) {
 		return 0;
+	}
+	// Linux loopback typically advertises MTU 65536 — one above what
+	// fits in uint16_t. Clamp at 65535 (also the UDP datagram size
+	// ceiling, so callers can't use a larger value anyway) rather
+	// than rejecting the interface outright.
+	if (mtu > 65535) {
+		mtu = 65535;
 	}
 	return static_cast<uint16_t>(mtu);
 }

@@ -80,6 +80,12 @@ add_executable (NetworkFunctionsTest
 	NetworkFunctionsTest.cpp
 	${CMAKE_SOURCE_DIR}/src/NetworkFunctions.cpp
 	${CMAKE_SOURCE_DIR}/src/LibSocket.cpp
+	# LibSocket.cpp transitively #includes LibSocketAsio.cpp on
+	# ENABLE_BOOST builds, which calls SetUdpKernelRecvBufferBytes.
+	# Pull the publisher TU here too (mirrors src/CMakeLists.txt's
+	# mulesocket library layout) — this test target builds LibSocket.cpp
+	# directly rather than linking against mulesocket.
+	${CMAKE_SOURCE_DIR}/src/UdpReceiveBufferStat.cpp
 )
 
 add_test (NAME NetworkFunctionsTest
@@ -247,6 +253,12 @@ target_include_directories (NetworkInfoTest
 target_link_libraries (NetworkInfoTest
 	muleunit
 )
+
+# Windows: htons / htonl / inet_ntop live in ws2_32. Without this, the
+# loopback test's address-construction fails to link on mingw.
+if (WIN32)
+	target_link_libraries (NetworkInfoTest ws2_32)
+endif()
 
 
 # ---------------------------------------------------------------------------

@@ -31,9 +31,16 @@
 #include <muleunit/test.h>
 #include "NetworkInfo.h"
 
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#if defined(__linux__) || defined(__APPLE__) || defined(__unix__) || \
+    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#	define NATT_NETWORKINFOTEST_POSIX 1
+#	include <sys/socket.h>
+#	include <netinet/in.h>
+#	include <arpa/inet.h>
+#else
+#	include <winsock2.h>
+#	include <ws2tcpip.h>
+#endif
 #include <cstring>
 
 using namespace muleunit;
@@ -82,8 +89,7 @@ TEST(NetworkInfo, BestInterfaceForLoopbackV4)
 		sizeof(target),
 		mtu, ifindex);
 
-#if defined(__linux__) || defined(__APPLE__) || defined(__unix__) || \
-    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#if NATT_NETWORKINFOTEST_POSIX
 	// POSIX: loopback must resolve.
 	ASSERT_TRUE(ok);
 	ASSERT_TRUE(ifindex != 0);

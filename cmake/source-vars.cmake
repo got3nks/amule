@@ -57,7 +57,6 @@ if (BUILD_MONOLITHIC OR BUILD_DAEMON)
 		UtpLayer.cpp
 		UtpLayerRegistry.cpp
 		UtpTimer.cpp
-		UdpReceiveBufferStat.cpp
 	)
 endif()
 

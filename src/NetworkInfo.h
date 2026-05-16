@@ -22,7 +22,19 @@
 #define NETWORKINFO_H
 
 #include <cstdint>
-#include <sys/socket.h>     // sockaddr, socklen_t
+
+// Forward-declare instead of #include <sys/socket.h> (POSIX-only) so
+// this header stays mingw-buildable. Callers that pass actual sockaddr
+// objects already include the right system header (sys/socket.h on
+// POSIX, winsock2.h on Windows). The socklen_t typedef matches the
+// platform's expected signedness so a TU that also includes ws2tcpip.h
+// (mingw) doesn't conflict on its `typedef int socklen_t`.
+struct sockaddr;
+#if defined(_WIN32) || defined(__WINDOWS__)
+typedef int          socklen_t;
+#else
+typedef unsigned int socklen_t;
+#endif
 
 // Phase A2 of the NAT-T port (see .archive/eMuleAI-nat-t-implementation-plan.md
 // cluster 2). Cross-platform shim providing the network-introspection
