@@ -250,3 +250,93 @@ jobs:
         run: ccache --show-stats
       - name: run tests
         run: ctest ${{ env.ctest_flags }}
+
+  # 32-bit Linux: build wx 3.2 from source SHARED (+libcurl for wxWebRequest;
+  # Debian ships wx with it off). Proven 32-bit-clean — no aMule changes.
+  # wx install + ccache live under the workspace so actions/cache can persist
+  # them across runs (the build runs inside a 32-bit docker container).
+  build_cmake_linux_i386:
+    name: Build CMake Linux i386 (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v7
+      - name: cache wx (i386)
+        uses: actions/cache@v6
+        with:
+          path: wx-i386
+          key: wx-i386-3.2.6
+      - name: cache ccache (i386)
+        uses: actions/cache@v6
+        with:
+          path: .ccache-i386
+          key: i386-${{ matrix.build_type }}-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: i386-${{ matrix.build_type }}-ccache-
+      - name: i386 build + tests
+        run: |
+          docker run --rm --platform linux/386 \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -e WX_PREFIX=/src/wx-i386 -e CCACHE_DIR=/src/.ccache-i386 \
+            -v "$PWD":/src -w /src i386/debian:bookworm bash -euxc "$BUILD_SCRIPT"
+        env:
+          BUILD_SCRIPT: &script |
+            export CCACHE_MAXSIZE=500M
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+              build-essential ccache cmake gettext pkg-config binutils-dev \
+              wget ca-certificates bzip2 libgtk-3-dev libcurl4-openssl-dev \
+              libboost-all-dev libcrypto++-dev libgd-dev libupnp-dev \
+              libmaxminddb-dev libreadline-dev libglib2.0-dev libatomic1 >/dev/null
+            if [ ! -x "$WX_PREFIX/bin/wx-config" ]; then
+              cd /tmp
+              wget -q https://github.com/wxWidgets/wxWidgets/releases/download/v3.2.6/wxWidgets-3.2.6.tar.bz2
+              tar xf wxWidgets-3.2.6.tar.bz2 && cd wxWidgets-3.2.6
+              ./configure --with-gtk=3 --enable-webrequest --prefix="$WX_PREFIX"
+              make -j"$(nproc)" && make install
+            fi
+            export LD_LIBRARY_PATH="$WX_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+            cd /src
+            ccache --zero-stats || true
+            cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+              -DwxWidgets_CONFIG_EXECUTABLE="$WX_PREFIX/bin/wx-config" \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DBUILD_MONOLITHIC=YES -DBUILD_DAEMON=YES -DBUILD_AMULECMD=YES \
+              -DBUILD_WEBSERVER=YES -DBUILD_REMOTEGUI=YES -DBUILD_ED2K=YES \
+              -DBUILD_CAS=YES -DBUILD_WXCAS=YES -DBUILD_ALC=YES -DBUILD_ALCC=YES \
+              -DBUILD_TESTING=YES -DENABLE_NLS=YES -DENABLE_UPNP=YES -DENABLE_IP2COUNTRY=YES
+            cmake --build build -j"$(nproc)"
+            ccache --show-stats || true
+            ctest --test-dir build --output-on-failure --timeout 30
+
+  build_cmake_linux_armhf:
+    name: Build CMake Linux armhf (${{ matrix.build_type }}) [qemu]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+      - name: cache wx (armhf)
+        uses: actions/cache@v6
+        with:
+          path: wx-armhf
+          key: wx-armhf-3.2.6
+      - name: cache ccache (armhf)
+        uses: actions/cache@v6
+        with:
+          path: .ccache-armhf
+          key: armhf-${{ matrix.build_type }}-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: armhf-${{ matrix.build_type }}-ccache-
+      - name: armhf full build + tests (emulated)
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -e WX_PREFIX=/src/wx-armhf -e CCACHE_DIR=/src/.ccache-armhf \
+            -v "$PWD":/src -w /src arm32v7/debian:bookworm bash -euxc "$BUILD_SCRIPT"
+        env:
+          BUILD_SCRIPT: *script
