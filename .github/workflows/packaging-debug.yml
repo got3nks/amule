@@ -1,0 +1,337 @@
+# Debug packaging — fork-only, manually triggered.
+#
+# Builds full Debug artifacts (CMAKE_BUILD_TYPE=Debug: asserts on, no
+# optimisation, unstripped DWARF) for every platform, so we can hand a
+# symbol-rich binary to a user for troubleshooting (verbose logs, gdb/lldb
+# backtraces, systemd-coredump resolution). Mirrors packaging.yml but flips
+# the build type and keeps symbols. Debug-ness is threaded in via the
+# AMULE_BUILD_TYPE env (honoured by packaging/{macos,windows,linux}/build.sh,
+# default Release) except Flatpak, whose Debug comes from the manifest on
+# this branch. Every artifact is suffixed `-debug` so a slow debug binary is
+# never mistaken for a release build.
+#
+# Debug builds are slow and large — this never runs automatically. Trigger
+# from the Actions tab, or:
+#   gh workflow run packaging-debug.yml --ref <branch> -f only=<platform>
+# Optionally scope to one platform track (appimage, flatpak, macos, windows).
+
+name: Packaging (debug symbols)
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: >-
+          Comma-separated platform tracks to run (default empty = all).
+          Valid: appimage, flatpak, macos, windows.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1G
+  # Honoured by packaging/{macos,windows,linux appimage}/build.sh. Flatpak
+  # ignores it (its Debug config lives in the manifest on this branch).
+  AMULE_BUILD_TYPE: Debug
+
+jobs:
+
+  # ------------------------------------------------------------------
+  # Linux — AppImage on x86_64 + aarch64 native runners
+  # ------------------------------------------------------------------
+  appimage:
+    name: AppImage (${{ matrix.arch }}, Debug)
+    if: inputs.only == '' || contains(inputs.only, 'appimage')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64,  runs-on: ubuntu-22.04 }
+          - { arch: aarch64, runs-on: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # for git describe in build.sh
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-appimage-${{ matrix.arch }}-debug-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: ${{ runner.os }}-appimage-${{ matrix.arch }}-debug-ccache-
+      - name: Build AppImage (Debug)
+        run: packaging/linux/build.sh appimage
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-appimage-${{ matrix.arch }}-debug-ccache-${{ github.run_id }}
+      - name: Label artifact -debug
+        run: |
+          for f in dist/aMule-*-Linux-*.AppImage; do
+            mv "$f" "${f%.AppImage}-debug.AppImage"
+          done
+          ls -la dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: appimage-${{ matrix.arch }}-debug
+          path: dist/aMule-*-Linux-*-debug.AppImage
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Linux — Flatpak (x86_64). Debug config comes from the branch manifest
+  # (strip: false + no-debuginfo: true + -DCMAKE_BUILD_TYPE=Debug).
+  # ------------------------------------------------------------------
+  flatpak:
+    name: Flatpak (x86_64, Debug)
+    if: inputs.only == '' || contains(inputs.only, 'flatpak')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install flatpak + flatpak-builder + GNOME runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder gettext-base
+          flatpak remote-add --user --if-not-exists flathub \
+              https://flathub.org/repo/flathub.flatpakrepo
+          set -a; . packaging/linux/versions.env; set +a
+          flatpak install --user --noninteractive flathub \
+              "org.gnome.Platform//${GNOME_RUNTIME_VERSION}" \
+              "org.gnome.Sdk//${GNOME_RUNTIME_VERSION}"
+      - name: Restore flatpak-builder ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-flatpak-x86_64-debug-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**', 'packaging/linux/flatpak/**') }}
+          restore-keys: ${{ runner.os }}-flatpak-x86_64-debug-ccache-
+      - name: Build Flatpak (Debug)
+        run: packaging/linux/build.sh flatpak
+      - name: Save flatpak-builder ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-flatpak-x86_64-debug-ccache-${{ github.run_id }}
+      - name: Label artifact -debug
+        run: |
+          for f in dist/aMule-*-Linux-x64.flatpak; do
+            mv "$f" "${f%.flatpak}-debug.flatpak"
+          done
+          ls -la dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak-x86_64-debug
+          path: dist/aMule-*-Linux-x64-debug.flatpak
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # macOS — native arm64 + x86_64 Debug builds, lipo-merged to Universal2
+  # ------------------------------------------------------------------
+  macos-build:
+    name: macOS .app (${{ matrix.arch }}, Debug)
+    if: inputs.only == '' || contains(inputs.only, 'macos')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            archcmd: ''
+            brew_prefix: /opt/homebrew
+          - arch: x86_64
+            archcmd: 'arch -x86_64'
+            brew_prefix: /usr/local
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Bootstrap x86_64 Homebrew (Rosetta)
+        if: matrix.arch == 'x86_64'
+        run: |
+          arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+      - name: Install Homebrew deps
+        run: |
+          BREW=${{ matrix.brew_prefix }}/bin/brew
+          ${{ matrix.archcmd }} $BREW update
+          ${{ matrix.archcmd }} $BREW install --quiet \
+              cmake wxwidgets cryptopp libupnp gd gettext boost dylibbundler libmaxminddb \
+              ccache
+          echo "${{ matrix.brew_prefix }}/bin" >> "$GITHUB_PATH"
+          echo "${{ matrix.brew_prefix }}/opt/gettext/bin" >> "$GITHUB_PATH"
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-macos-${{ matrix.arch }}-debug-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: ${{ runner.os }}-macos-${{ matrix.arch }}-debug-ccache-
+      - name: Build native-arch .app (Debug)
+        env:
+          MACOS_ARCHITECTURES: ${{ matrix.arch }}
+        run: ${{ matrix.archcmd }} packaging/macos/build.sh
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-macos-${{ matrix.arch }}-debug-ccache-${{ github.run_id }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app-${{ matrix.arch }}-debug
+          path: build-macos/src/aMule.app
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-gui-${{ matrix.arch }}-debug
+          path: build-macos/src/aMuleGUI.app
+          if-no-files-found: error
+          retention-days: 1
+
+  macos-universal2:
+    name: macOS Universal2 .dmg (Debug)
+    needs: macos-build
+    if: inputs.only == '' || contains(inputs.only, 'macos')
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-app-arm64-debug
+          path: arm64.app
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-app-x86_64-debug
+          path: x86_64.app
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-gui-arm64-debug
+          path: arm64-gui.app
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-gui-x86_64-debug
+          path: x86_64-gui.app
+      - name: lipo-merge into Universal2 .app bundles
+        run: |
+          merge_app() {
+              local BASE="$1"
+              local OTHER="$2"
+              local OUT="$3"
+              cp -R "${BASE}" "${OUT}"
+              local rel local_arm local_x86
+              while IFS= read -r -d '' rel; do
+                  local_arm="${BASE}/${rel}"
+                  local_x86="${OTHER}/${rel}"
+                  if file "${local_arm}" | grep -q "Mach-O" && [ -f "${local_x86}" ]; then
+                      lipo -create -output "${OUT}/${rel}" "${local_arm}" "${local_x86}"
+                      chmod +x "${OUT}/${rel}"
+                  fi
+              done < <(cd "${BASE}" && find . -type f -print0 | sed 's|^\./||g')
+              codesign --force --deep --sign - "${OUT}"
+          }
+          merge_app arm64.app     x86_64.app     aMule.app
+          merge_app arm64-gui.app x86_64-gui.app aMuleGUI.app
+      - name: Build Universal2 .dmg (Debug)
+        run: |
+          VERSION=$(git describe --tags --always)
+          mkdir -p dist
+          STAGE=$(mktemp -d)
+          cp -R aMule.app    "${STAGE}/"
+          cp -R aMuleGUI.app "${STAGE}/"
+          ln -s /Applications "${STAGE}/Applications"
+          hdiutil create -volname "aMule ${VERSION} Debug" \
+              -srcfolder "${STAGE}" -ov -format UDZO \
+              "dist/aMule-${VERSION}-macOS-universal2-debug.dmg"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal2-debug
+          path: dist/aMule-*-macOS-universal2-debug.dmg
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Windows — portable .zip for x64 (MINGW64) and ARM64 (CLANGARM64).
+  # ------------------------------------------------------------------
+  windows-zip:
+    name: Windows portable .zip (${{ matrix.arch }}, Debug)
+    if: inputs.only == '' || contains(inputs.only, 'windows')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            msystem: MINGW64
+            runs-on: windows-2025
+            pkg_prefix: mingw-w64-x86_64
+          - arch: arm64
+            msystem: CLANGARM64
+            runs-on: windows-11-arm
+            pkg_prefix: mingw-w64-clang-aarch64
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.pkg_prefix }}-boost
+            ${{ matrix.pkg_prefix }}-ccache
+            ${{ matrix.pkg_prefix }}-cmake
+            ${{ matrix.pkg_prefix }}-crypto++
+            ${{ matrix.pkg_prefix }}-gettext
+            ${{ matrix.pkg_prefix }}-libgd
+            ${{ matrix.pkg_prefix }}-libmaxminddb
+            ${{ matrix.pkg_prefix }}-make
+            ${{ matrix.pkg_prefix }}-pkgconf
+            ${{ matrix.pkg_prefix }}-pupnp
+            ${{ matrix.pkg_prefix }}-readline
+            ${{ matrix.pkg_prefix }}-toolchain
+            ${{ matrix.pkg_prefix }}-wxwidgets3.2-msw
+            ${{ matrix.pkg_prefix }}-zlib
+            git
+            zip
+      - name: Restore ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-windows-${{ matrix.arch }}-debug-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          restore-keys: ${{ runner.os }}-windows-${{ matrix.arch }}-debug-ccache-
+      - name: Configure git safe.directory for MSYS2 git
+        run: git config --global --add safe.directory '*'
+      - name: Build portable .zip (Debug)
+        env:
+          WINDOWS_MSYSTEM: ${{ matrix.msystem }}
+        run: packaging/windows/build.sh
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-windows-${{ matrix.arch }}-debug-ccache-${{ github.run_id }}
+      - name: Label artifact -debug
+        run: |
+          for f in dist/aMule-*-Windows-${{ matrix.arch }}.zip; do
+            mv "$f" "${f%.zip}-debug.zip"
+          done
+          ls -la dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.arch }}-debug
+          path: dist/aMule-*-Windows-${{ matrix.arch }}-debug.zip
+          if-no-files-found: error
