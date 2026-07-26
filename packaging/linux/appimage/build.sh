@@ -34,7 +34,7 @@ mkdir -p "${ARTIFACT_DIR}"
 
 # 1. Configure + build aMule.
 cmake -B "${BUILD_DIR}" -S "${REPO}" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_BUILD_TYPE="${AMULE_BUILD_TYPE:-Release}" \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DBUILD_MONOLITHIC=YES \
     -DBUILD_REMOTEGUI=YES \
@@ -91,6 +91,13 @@ for lib in "${FORCE_LIBS[@]}"; do
         LIB_ARGS+=(--library "${LIBARCH_DIR}/${lib}")
     fi
 done
+
+# linuxdeploy strips every binary/library it processes by default, which
+# would throw away the DWARF a Debug build exists to provide. Keep symbols
+# for a Debug build so user-supplied backtraces resolve to real names.
+if [ "${AMULE_BUILD_TYPE:-Release}" = "Debug" ]; then
+    export NO_STRIP=1
+fi
 
 # 4. linuxdeploy bundles wxGTK + GTK3 + every transitive .so via patchelf,
 #    rewrites RPATHs, lays out the AppDir.

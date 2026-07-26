@@ -129,6 +129,7 @@ build_appimage() {
         --security-opt apparmor:unconfined \
         -e "HOST_UID=$(id -u)" \
         -e "HOST_GID=$(id -g)" \
+        -e "AMULE_BUILD_TYPE=${AMULE_BUILD_TYPE:-Release}" \
         -v "${REPO_ROOT}:/work" \
         "${ccache_args[@]}" \
         "${image_tag}"

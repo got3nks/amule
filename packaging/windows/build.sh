@@ -93,7 +93,7 @@ build() {
     # ccache also gets disabled here; on CLANGARM64 it triggered the
     # same family of try_compile crashes that pushed us off Ninja.
     cmake -B "${BUILD_DIR}" -S "${REPO_ROOT}" -G "MinGW Makefiles" \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE="${AMULE_BUILD_TYPE:-Release}" \
         -DCMAKE_C_COMPILER_LAUNCHER= \
         -DCMAKE_CXX_COMPILER_LAUNCHER= \
         -DBUILD_MONOLITHIC=YES \

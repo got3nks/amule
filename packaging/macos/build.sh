@@ -72,7 +72,7 @@ build() {
 
     echo "==> Configuring cmake (target macOS ${MACOS_DEPLOYMENT_TARGET}${MACOS_ARCHITECTURES:+, archs ${MACOS_ARCHITECTURES}})"
     cmake -B "${BUILD_DIR}" -S "${REPO_ROOT}" \
-        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_BUILD_TYPE="${AMULE_BUILD_TYPE:-Release}" \
         ${arch_arg[@]+"${arch_arg[@]}"} \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" \
         -DBUILD_MONOLITHIC=YES \

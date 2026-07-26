@@ -42,9 +42,17 @@ separate-locales: false
 # with ≤ 8 GB RAM this OOM-kills wx/cryptopp/aMule mid-build because
 # C++ TUs peak at 1-2 GB each. MAKEFLAGS is honored by both make and
 # (via cmake) ninja, so a single env override caps everything.
+#
+# strip: false + no-debuginfo: true keep full DWARF symbols inside the
+# installed binaries (instead of flatpak-builder stripping them into a
+# sibling .Debug extension), so systemd-coredump dumps from user reports
+# resolve to real function names instead of `n/a`. This is the fork-only
+# debug manifest — see .github/workflows/packaging-debug.yml.
 build-options:
   env:
     MAKEFLAGS: "-j2"
+  strip: false
+  no-debuginfo: true
 
 finish-args:
   # Networking (ed2k + Kad + WebUI + EC + UPnP).
@@ -335,7 +343,7 @@ modules:
   - name: amule
     buildsystem: cmake-ninja
     config-opts:
-      - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_BUILD_TYPE=Debug
       - -DBUILD_MONOLITHIC=YES
       # The GNOME 49 SDK ships libbfd (in /usr/lib) and bfd.h (in
       # /usr/include), so aMule's auto-detection at cmake/bfd.cmake
