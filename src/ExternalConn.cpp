@@ -451,6 +451,15 @@ public:
 	// chat session ops and may be sent EC_OP_CHAT_SESSIONS replies.
 	bool ChatActive() const { return m_chatActive; }
 
+	// debug/sharedwatcher-current: when did this client last get a request in,
+	// and what was it. The GUI-side trace can say "we sent it and nothing came
+	// back", but not whether the request ever ARRIVED. If these stop advancing
+	// while the client keeps polling, the daemon stopped reading this socket --
+	// which is a different bug from the daemon failing to answer.
+	uint64 LastRequestMs() const { return m_dbgLastRequestMs; }
+	uint32 RequestsSeen() const { return m_dbgRequestsSeen; }
+	int LastOpcode() const { return m_dbgLastOpcode; }
+
 private:
 	ECNotifier *m_ec_notifier;
 
@@ -570,7 +579,15 @@ private:
 	// the tag never sees the capability echoed and must never send those
 	// opcodes — an unknown opcode asserts before the EC_OP_FAILED path.
 	bool m_chatActive;
-	// File ECIDs sent in the previous response for each EC request path.
+	// debug/sharedwatcher-current, see LastRequestMs above.
+	uint64 m_dbgLastRequestMs = 0;
+	uint32 m_dbgRequestsSeen = 0;
+	int m_dbgLastOpcode = -1;
+	// This connection's own queue of incoming peer chat messages, drained on
+	// EC_OP_GET_CHAT_MESSAGES. Per-client (not global) so several GUIs each
+	// get their own independent copy — like the partial-update valuemaps.
+	// <sender GUI_ID, "name|message">.
+	s	// File ECIDs sent in the previous response for each EC request path.
 	// Diffed against the current snapshot to compute the removal list emitted
 	// to partial-update-capable clients. Tracked per-path because amulegui
 	// uses `EC_OP_GET_UPDATE` (mixed shared + partfile, served by
@@ -860,6 +877,13 @@ const CECPacket *CECServerSocket::OnPacketReceived(const CECPacket *packet, uint
 {
 	packet->DebugPrint(true, trueSize);
 
+	// debug/sharedwatcher-current: stamp arrival before anything can early-out,
+	// so "did the request reach us at all" is answerable even for the paths
+	// that close the socket below.
+	m_dbgLastRequestMs = GetTickCount64();
+	m_dbgRequestsSeen++;
+	m_dbgLastOpcode = (int)packet->GetOpCode();
+
 	const CECPacket *reply = NULL;
 
 	if (m_conn_state == CONN_FAILED) {
@@ -1039,6 +1063,38 @@ void ExternalConn::KillAllSockets()
 		s->Destroy();
 	}
 	socket_list.clear();
+}
+
+void ExternalConn::DebugPollEcSockets()
+{
+	// debug/sharedwatcher-current -----------------------------------------
+	// The other half of the amulegui stall picture. That side proved the GUI
+	// had a read armed on an empty socket -- so the reply never arrived. This
+	// says which of the two reasons it is, from the daemon's own vantage:
+	//
+	//   requests still arriving, no reply going out -> we fail to ANSWER, and
+	//       the chat handler is the place to look (six stalls, six times the
+	//       oldest unanswered request was EC_OP_GET_CHAT_MESSAGES).
+	//   requests stopped arriving while the client kept polling -> we stopped
+	//       READING this socket. kernel_unread on our end says so outright:
+	//       the bytes are here and nobody drained them. That is per socket,
+	//       which is also why amuleapi would be unaffected on the same daemon.
+	//
+	// Silent unless a client has actually gone quiet, so this can sit on a
+	// production node for hours without filling the log.
+	const uint64 nowMs = GetTickCount64();
+	for (CECServerSocket *s : socket_list) {
+		if (s->RequestsSeen() == 0) {
+			continue;
+		}
+		const uint64 since = nowMs - s->LastRequestMs();
+		if (since < 10000) {
+			continue; // healthy: still polling us
+		}
+		AddLogLineN(CFormat(wxT("[ecwatch] %s quiet %llums  last_op=0x%02x seen=%u  %s")) %
+			    s->GetPeer() % (unsigned long long)since % (unsigned)s->LastOpcode() %
+			    s->RequestsSeen() % s->DescribeReadState());
+	}
 }
 
 void ExternalConn::ResetAllLogs()

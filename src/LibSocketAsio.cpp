@@ -76,6 +76,9 @@
 #endif
 
 #include "LibSocket.h"
+#ifndef __WINDOWS__
+#include <sys/ioctl.h> // FIONREAD -- debug/ec-fifo-trace read-state dump
+#endif
 #include <wx/thread.h>     // wxMutex
 #include <wx/intl.h>       // _()
 #include <common/Format.h> // Needed for CFormat
@@ -822,6 +825,39 @@ public:
 	// see a stale read state and block on data that is already here.
 	void EventProcessed() { m_eventPending.exchange(false, std::memory_order_acquire); }
 
+	// debug/ec-fifo-trace ---------------------------------------------------
+	// Answers the one question the request-side trace cannot: when the poll
+	// stalls, did the reply never arrive, or did it arrive and never get read?
+	//
+	// FIONREAD is what settles it. It reports bytes sitting in the kernel
+	// receive buffer with nobody draining them, so a non-zero count means the
+	// daemon answered and this side simply never woke up to read it -- which
+	// is a bug here, not in the core. Zero means nothing was ever sent and the
+	// core is the place to look.
+	//
+	// The three latch members come with it because they are what decides
+	// whether a wakeup can still happen at all: PostReadEvent is a no-op while
+	// m_eventPending is set, and the only things that ever re-arm it are a
+	// completing background read (m_readPending) or leftover buffered data
+	// (m_readBufferContent). All three zero/false with bytes waiting is the
+	// signature of a permanently lost wakeup.
+	wxString DescribeReadState() const
+	{
+		long avail = -1;
+#ifndef __WINDOWS__
+		if (m_socket != NULL && m_socket->is_open()) {
+			int n = 0;
+			if (::ioctl(m_socket->native_handle(), FIONREAD, &n) == 0) {
+				avail = n;
+			}
+		}
+#endif
+		return CFormat(wxT("kernel_unread=%ld event_pending=%d read_pending=%d "
+				   "buffered=%u blocks_read=%d")) %
+		       avail % (int)m_eventPending % (int)m_readPending %
+		       (unsigned)m_readBufferContent % (int)m_blocksRead;
+	}
+
 	void SetWrapSocket(CLibSocket *socket)
 	{
 		m_libSocket.store(socket, std::memory_order_release);
@@ -1410,6 +1446,11 @@ bool CLibSocket::BlocksWrite() const
 void CLibSocket::EventProcessed()
 {
 	m_aSocket->EventProcessed();
+}
+
+wxString CLibSocket::DescribeReadState() const
+{
+	return m_aSocket ? m_aSocket->DescribeReadState() : wxString(wxT("no socket"));
 }
 
 void CLibSocket::LinkSocketImpl(std::shared_ptr<class CAsioSocketImpl> socket)

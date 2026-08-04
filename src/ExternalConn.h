@@ -126,6 +126,9 @@ public:
 	void KillAllSockets();
 	void ResetAllLogs();
 
+	// debug/sharedwatcher-current: log any authorised EC client that has gone
+	// quiet, with our own read state for its socket. Called from OnCoreTimer.
+	void DebugPollEcSockets();
 	// Brute-force protection for the password exchange, shared by every
 	// connection. It lives here rather than on CECServerSocket because a
 	// socket dies with its connection: per-socket buckets would reset on

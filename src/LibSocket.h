@@ -114,6 +114,11 @@ public:
 	// Show we're ready for another event
 	void EventProcessed();
 
+	// debug/ec-fifo-trace: kernel unread bytes + the read-latch state, so a
+	// stall can be attributed to the core (nothing sent) or to us (sent but
+	// never read). See CAsioSocketImpl::DescribeReadState.
+	wxString DescribeReadState() const;
+
 	// Get IP of client
 	const wxChar *GetIP() const;
 
