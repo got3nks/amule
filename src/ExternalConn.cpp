@@ -459,6 +459,12 @@ public:
 	uint64 LastRequestMs() const { return m_dbgLastRequestMs; }
 	uint32 RequestsSeen() const { return m_dbgRequestsSeen; }
 	int LastOpcode() const { return m_dbgLastOpcode; }
+	/// Report bookkeeping for DebugPollEcSockets: how many times this quiet
+	/// spell has been logged. Cleared as soon as the client talks again, so
+	/// each spell is rate-limited on its own rather than for the connection's
+	/// lifetime.
+	unsigned NoteQuietReport() { return ++m_dbgQuietReports; }
+	void ResetQuietReports() { m_dbgQuietReports = 0; }
 
 private:
 	ECNotifier *m_ec_notifier;
@@ -583,6 +589,7 @@ private:
 	uint64 m_dbgLastRequestMs = 0;
 	uint32 m_dbgRequestsSeen = 0;
 	int m_dbgLastOpcode = -1;
+	unsigned m_dbgQuietReports = 0;
 	// This connection's own queue of incoming peer chat messages, drained on
 	// EC_OP_GET_CHAT_MESSAGES. Per-client (not global) so several GUIs each
 	// get their own independent copy — like the partial-update valuemaps.
@@ -1080,16 +1087,34 @@ void ExternalConn::DebugPollEcSockets()
 	//       the bytes are here and nobody drained them. That is per socket,
 	//       which is also why amuleapi would be unaffected on the same daemon.
 	//
-	// Silent unless a client has actually gone quiet, so this can sit on a
-	// production node for hours without filling the log.
+	// Two filters, because "has not spoken recently" on its own is not the
+	// interesting condition and drowns the log in clients that are merely
+	// idle by design.
+	//
+	// kMinRequestsSeen: only a client that was actually polling can have
+	// stopped. A tool that authenticates and then acts on demand sits at two
+	// requests -- the login and the password -- for the life of the
+	// connection, and reporting it every few seconds for hours buries the one
+	// occurrence that matters.
+	//
+	// The report cap: a wedged socket holds its state indefinitely, so
+	// repeating it forever adds nothing after the first few. Enough are kept
+	// to show the numbers are not moving, covering the client's own reply
+	// watchdog window, then it drops to a heartbeat.
+	const unsigned kMinRequestsSeen = 100;
+	const unsigned kFullReports = 6;
+	const unsigned kHeartbeatEvery = 12;
+
 	const uint64 nowMs = GetTickCount64();
 	for (CECServerSocket *s : socket_list) {
-		if (s->RequestsSeen() == 0) {
+		const uint64 since = nowMs - s->LastRequestMs();
+		if (s->RequestsSeen() < kMinRequestsSeen || since < 10000) {
+			s->ResetQuietReports(); // talking, or never was
 			continue;
 		}
-		const uint64 since = nowMs - s->LastRequestMs();
-		if (since < 10000) {
-			continue; // healthy: still polling us
+		const unsigned n = s->NoteQuietReport();
+		if (n > kFullReports && (n % kHeartbeatEvery) != 0) {
+			continue;
 		}
 		AddLogLineN(CFormat(wxT("[ecwatch] %s quiet %llums  last_op=0x%02x seen=%u  %s")) %
 			    s->GetPeer() % (unsigned long long)since % (unsigned)s->LastOpcode() %
