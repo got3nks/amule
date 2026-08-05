@@ -653,6 +653,11 @@ public:
 	uint32 Read(char *buf, uint32 bytesToRead)
 	{
 		if (bytesToRead == 0) { // huh?
+			// Returns without arming anything. Logged unconditionally
+			// because it should be unreachable and, if it is reached, it
+			// is a connection that hangs rather than one that fails.
+			NoteRead("read0", 0);
+			AddLogLineN(wxT("[ecread] Read() asked for zero bytes -- no re-arm"));
 			return 0;
 		}
 
@@ -661,6 +666,11 @@ public:
 		}
 
 		if (m_ErrorCode) {
+			// Also returns without arming. Normally the lost-event path has
+			// already fired, but if it has not this is a silent hang too.
+			NoteRead("readErr", bytesToRead);
+			AddLogLineN(CFormat(wxT("[ecread] Read() bailed on error %d, wanted %u -- no re-arm")) %
+				m_ErrorCode % bytesToRead);
 			AddDebugLogLineF(logAsio, CFormat("Read1 %s %d - Error") % m_IP % bytesToRead);
 			return 0;
 		}
@@ -670,6 +680,19 @@ public:
 		if (m_readPending.load(std::memory_order_acquire) // Background read hasn't completed.
 			|| m_readBufferContent == 0) {            // shouldn't be if it's not pending
 
+			// With a read pending this is the ordinary end of data: the
+			// completion will post the event. With NO read pending and an
+			// empty buffer -- the case the comment above calls impossible --
+			// nothing will refill it and nothing will post anything, so the
+			// socket is finished. That is the shape every captured stall has.
+			if (!m_readPending) {
+				NoteRead("blockDead", bytesToRead);
+				AddLogLineN(CFormat(wxT("[ecread] Read() blocked with NO read pending, "
+						       "wanted %u, buffered %u -- no re-arm")) %
+					bytesToRead % (unsigned)m_readBufferContent);
+			} else {
+				NoteRead("block", bytesToRead);
+			}
 			m_blocksRead = true;
 			AddDebugLogLineF(logAsio, CFormat("Read1 %s %d - Block") % m_IP % bytesToRead);
 			return 0;
@@ -684,6 +707,7 @@ public:
 		m_readBufferPtr += readCache;
 
 		AddDebugLogLineF(logAsio, CFormat("Read2 %s %d - %d") % m_IP % bytesToRead % readCache);
+		NoteRead("read", readCache);
 		if (m_readBufferContent) {
 			// Data left, post another event
 			PostReadEvent(1);
@@ -825,6 +849,56 @@ public:
 	// see a stale read state and block on data that is already here.
 	void EventProcessed() { m_eventPending.exchange(false, std::memory_order_acquire); }
 
+	// debug: a short history of the read path, so the state at a stall comes
+	// with the sequence that produced it rather than only the end result.
+	//
+	// The stall leaves this socket with no read armed, no event pending and
+	// bytes still buffered -- a combination nothing should be able to reach,
+	// since every exit from Read() is supposed to either post an event or
+	// start a background read. Which exit actually ran is the whole question,
+	// and it cannot be inferred from the wreckage.
+	//
+	// A ring rather than a log line per operation: reads happen thousands of
+	// times a second and only the last handful before the wedge matter. Not
+	// synchronised -- Read runs on the main thread and HandleRead on the
+	// strand -- so entries can interleave, which is acceptable for a debug
+	// branch and much cheaper than locking the hot path.
+	struct ReadTrace
+	{
+		const char *what = "";
+		uint32 arg = 0;
+		uint32 content = 0;
+		bool pending = false;
+		bool evt = false;
+	};
+	static const unsigned kReadTraceLen = 24;
+	ReadTrace m_readTrace[kReadTraceLen];
+	unsigned m_readTraceAt = 0;
+
+	void NoteRead(const char *what, uint32 arg)
+	{
+		ReadTrace &t = m_readTrace[m_readTraceAt % kReadTraceLen];
+		t.what = what;
+		t.arg = arg;
+		t.content = m_readBufferContent;
+		t.pending = m_readPending;
+		t.evt = m_eventPending;
+		++m_readTraceAt;
+	}
+
+	wxString DescribeReadTrace() const
+	{
+		wxString out;
+		const unsigned n = m_readTraceAt < kReadTraceLen ? m_readTraceAt : kReadTraceLen;
+		const unsigned first = m_readTraceAt < kReadTraceLen ? 0 : m_readTraceAt % kReadTraceLen;
+		for (unsigned i = 0; i < n; ++i) {
+			const ReadTrace &t = m_readTrace[(first + i) % kReadTraceLen];
+			out += CFormat(wxT(" %s(%u)[c=%u p=%d e=%d]")) % wxString::FromAscii(t.what) %
+			       t.arg % t.content % (int)t.pending % (int)t.evt;
+		}
+		return out.IsEmpty() ? wxString(wxT(" (none)")) : out;
+	}
+
 	// debug/ec-fifo-trace ---------------------------------------------------
 	// Answers the one question the request-side trace cannot: when the poll
 	// stalls, did the reply never arrive, or did it arrive and never get read?
@@ -853,9 +927,9 @@ public:
 		}
 #endif
 		return CFormat(wxT("kernel_unread=%ld event_pending=%d read_pending=%d "
-				   "buffered=%u blocks_read=%d")) %
+				   "buffered=%u blocks_read=%d | recent:%s")) %
 		       avail % (int)m_eventPending % (int)m_readPending %
-		       (unsigned)m_readBufferContent % (int)m_blocksRead;
+		       (unsigned)m_readBufferContent % (int)m_blocksRead % DescribeReadTrace();
 	}
 
 	void SetWrapSocket(CLibSocket *socket)
@@ -1055,6 +1129,7 @@ private:
 		//
 		m_readPending.store(false, std::memory_order_release);
 		m_blocksRead = false;
+		NoteRead("handleRead", (uint32)bytes_transferred);
 		PostReadEvent(2);
 	}
 
@@ -1064,24 +1139,15 @@ private:
 
 	void StartBackgroundRead()
 	{
+		NoteRead("startBg", 0);
 		m_readPending.store(true, std::memory_order_relaxed);
 		m_readBufferContent = 0;
 		auto self = shared_from_this();
 		dispatch(m_strand, [self]() { self->DispatchBackgroundRead(); });
 	}
 
-	void PostReadEvent(int DEBUG_ONLY(from))
+	void PostReadEvent(int from)
 	{
-		// One atomic step, so exactly one caller can win the right to notify:
-		// a plain test-then-set lets the ASIO thread and the main thread both
-		// see it clear and post twice, or -- the damaging direction -- lets
-		// this thread see it set and skip while the main thread is about to
-		// clear it, leaving data buffered with nothing left to announce it.
-		//
-		// The exchange writes unconditionally, so even the skipping path
-		// releases everything written before it (the buffer, and the cleared
-		// m_readPending). EventProcessed acquires that same value, which is
-		// what stops the reader from then acting on a stale read state.
 		// Checked before the latch is taken, not after: with no wrapper there
 		// is nothing to deliver a notification, and EventProcessed only runs
 		// off a delivered one. Taking the latch here would leave it set for
@@ -1090,12 +1156,24 @@ private:
 		// deliberately: it logs "wrapper gone" and carries on to post.
 		CLibSocket *wrapper = m_libSocket.load(std::memory_order_acquire);
 		if (!wrapper) {
+			NoteRead("postNoWrap", (uint32)from);
 			AddDebugLogLineF(
 				logAsio, CFormat("Post read event %d %s - no wrapper") % from % m_IP);
 			return;
 		}
 
-		if (!m_eventPending.exchange(true, std::memory_order_acq_rel)) {
+		// Suppression is the interesting half: an event already outstanding
+		// means this one is dropped on the floor, which is correct only if
+		// that outstanding event still gets delivered.
+		//
+		// The label comes from the exchange's own return value rather than a
+		// separate read of the latch. A second read is both racy and, worse,
+		// free to disagree with the decision it is supposed to describe --
+		// the flag can change between the two, and a trace that mislabels the
+		// skip is useless for the exact race it exists to study.
+		const bool alreadyPending = m_eventPending.exchange(true, std::memory_order_acq_rel);
+		NoteRead(alreadyPending ? "postSkip" : "post", (uint32)from);
+		if (!alreadyPending) {
 			AddDebugLogLineF(logAsio, CFormat("Post read event %d %s") % from % m_IP);
 			CoreNotify_LibSocketReceive(wrapper, m_ErrorCode);
 		}
