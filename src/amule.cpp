@@ -1966,49 +1966,6 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 		}
 	}
 
-	// debug/sharedwatcher-current ------------------------------------------
-	// Synthetic peer chat message, on a fixed interval, to reproduce the
-	// amulegui poll stall on demand.
-	//
-	// Six for six, the request the daemon stopped answering was
-	// EC_OP_GET_CHAT_MESSAGES, and the gaps between stalls (51 min to 9 h)
-	// match how rarely a real peer actually chats rather than any timer. The
-	// reply is an empty packet almost always; the interesting path only runs
-	// when the queue has something in it, which is exactly what this forces.
-	//
-	// Injected here rather than in the EC handler so it travels the same route
-	// a real message does -- ExternalConn::QueueChatMessage fanning out to each
-	// chat-capable socket -- leaving the code under test untouched.
-	//
-	// AMULE_CHAT_INJECT_SECS unset or 0 disables it, so this build behaves
-	// normally unless the repro is being driven.
-	{
-		static int s_injectSecs = -1;
-		static uint64 s_msPrevInject = 0;
-		static unsigned s_seq = 0;
-		if (s_injectSecs < 0) {
-			const wxString env = wxGetenv(wxT("AMULE_CHAT_INJECT_SECS"));
-			long v = 0;
-			s_injectSecs = (!env.IsEmpty() && env.ToLong(&v) && v > 0) ? (int)v : 0;
-			if (s_injectSecs > 0) {
-				AddLogLineN(CFormat(wxT("[chatinject] synthetic peer chat every %d s")) %
-					    s_injectSecs);
-			}
-		}
-		if (s_injectSecs > 0 && theApp->ECServerHandler &&
-			(msCur - s_msPrevInject) > (uint64)s_injectSecs * 1000) {
-			s_msPrevInject = msCur;
-			++s_seq;
-			// Same shape a real relayed message has: a GUI_ID sender and a
-			// "name|message" payload, since CChatSelector::ProcessMessage
-			// splits on the separator and builds a tab from the name.
-			const uint64 sender = 0x0100007fULL; // 127.0.0.1-shaped GUI_ID
-			AddLogLineN(CFormat(wxT("[chatinject] queueing synthetic message #%u")) % s_seq);
-			theApp->ECServerHandler->QueueChatMessage(
-				sender, CFormat(wxT("injected-peer|synthetic chat message #%u")) % s_seq);
-		}
-	}
-
 	// Check if we should terminate the app. OnShutdownSignal only sets
 	// the flag; the actual exit trigger runs from here (normal context)
 	// every CORE_TIMER_PERIOD ms.

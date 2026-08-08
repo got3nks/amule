@@ -48,6 +48,20 @@ wxDEFINE_EVENT(wxEVT_EC_CONNECTION, wxEvent);
 
 namespace
 {
+// Monotonic milliseconds. GetTickCount64 is an application symbol and libec is
+// linked by amulecmd without it, so the same clock the reply watchdog already
+// uses is borrowed here instead of adding a link dependency for diagnostics.
+uint64 DbgNowMs()
+{
+	return (uint64)std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch())
+		.count();
+}
+} // namespace
+
+
+namespace
+{
 // Optional graceful-shutdown handler for OnLost(); see SetEcConnectionLostHandler.
 void (*s_connectionLostHandler)() = nullptr;
 } // namespace
@@ -611,6 +625,9 @@ const CECPacket *CRemoteConnect::OnPacketReceived(const CECPacket *packet, uint3
 		if (!m_req_fifo.empty()) {
 			CECPacketHandlerBase *handler = m_req_fifo.front();
 			m_req_fifo.pop_front();
+			if (!m_dbgReqMeta.empty()) {
+				m_dbgReqMeta.pop_front();
+			}
 			if (handler) {
 				handler->HandlePacket(packet);
 			}
@@ -634,12 +651,34 @@ void CRemoteConnect::SendRequest(CECPacketHandlerBase *handler, const CECPacket 
 {
 	m_req_count++;
 	m_req_fifo.push_back(handler);
+	m_dbgReqMeta.push_back(std::make_pair((uint8)request->GetOpCode(), DbgNowMs()));
 	CECSocket::SendPacket(request);
 }
 
 void CRemoteConnect::SendPacket(const CECPacket *request)
 {
 	SendRequest(0, request);
+}
+
+wxString CRemoteConnect::DescribePendingRequests() const
+{
+	const uint64 now = DbgNowMs();
+	wxString out;
+	unsigned shown = 0;
+	for (std::list<std::pair<uint8, uint64> >::const_iterator it = m_dbgReqMeta.begin();
+		it != m_dbgReqMeta.end(); ++it) {
+		if (shown == 8) {
+			out += CFormat(wxT(", +%u more")) % (unsigned)(m_dbgReqMeta.size() - shown);
+			break;
+		}
+		if (shown) {
+			out += wxT(", ");
+		}
+		out += CFormat(wxT("op=0x%02x waiting %llums")) % (unsigned)it->first %
+		       (unsigned long long)(now - it->second);
+		++shown;
+	}
+	return out.IsEmpty() ? wxString(wxT("(none)")) : out;
 }
 
 void CRemoteConnect::DiscardRequestQueue()
@@ -656,6 +695,7 @@ void CRemoteConnect::DiscardRequestQueue()
 		}
 	}
 	m_req_fifo.clear();
+	m_dbgReqMeta.clear();
 	m_req_count = 0;
 }
 

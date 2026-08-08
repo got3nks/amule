@@ -103,6 +103,8 @@ private:
 	// order, so it is ok to assume that order of replies is same as order of requests
 	std::list<CECPacketHandlerBase *> m_req_fifo;
 	int m_req_count;
+	// debug: opcode and send time per in-flight request, parallel to m_req_fifo.
+	std::list<std::pair<uint8, uint64> > m_dbgReqMeta;
 	int m_req_fifo_thr;
 
 	wxEvtHandler *m_notifier;
@@ -377,6 +379,18 @@ public:
 	// matching reply is handled. Unlike m_req_count this never sees the
 	// handshake packets, so it is the honest in-flight count.
 	size_t GetReqFifoSize() const { return m_req_fifo.size(); }
+
+	// debug/ec-stall-diag: read-only views for the poll-timer trace. The FIFO
+	// size and the counter are kept separately because they disagree by a
+	// fixed offset -- the two handshake replies decrement the counter without
+	// ever having been pushed -- and the divergence is itself worth seeing.
+	int GetReqCount() const { return m_req_count; }
+	int GetReqFifoThreshold() const { return m_req_fifo_thr; }
+
+	/// Opcodes still awaiting a reply, oldest first, with how long each has
+	/// waited. Replies are FCFS, so the head is the request the peer stopped
+	/// answering. Built only when asked -- the bookkeeping behind it is silent.
+	wxString DescribePendingRequests() const;
 
 	// Milliseconds since the last packet arrived from the daemon, or since the
 	// connection was established if none has. Drives the reply watchdog: EC has

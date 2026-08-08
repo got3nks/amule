@@ -677,15 +677,25 @@ public:
 
 		// Acquire, pairing with the release in HandleRead: seeing false here
 		// means the buffer state published alongside it is visible too.
-		if (m_readPending.load(std::memory_order_acquire) // Background read hasn't completed.
-			|| m_readBufferContent == 0) {            // shouldn't be if it's not pending
+		//
+		// Loaded once and reused below. A second load can disagree with the
+		// one the branch was taken on, because the completion may land
+		// between them -- which is how the report below came to fire on
+		// perfectly healthy sockets.
+		const bool readPending = m_readPending.load(std::memory_order_acquire);
+		if (readPending                        // Background read hasn't completed.
+			|| m_readBufferContent == 0) { // shouldn't be if it's not pending
 
 			// With a read pending this is the ordinary end of data: the
 			// completion will post the event. With NO read pending and an
 			// empty buffer -- the case the comment above calls impossible --
 			// nothing will refill it and nothing will post anything, so the
 			// socket is finished. That is the shape every captured stall has.
-			if (!m_readPending) {
+			//
+			// Both halves have to hold. Testing the flag alone reported the
+			// ordinary case -- completion landed, buffer full, flag clear --
+			// as a dead socket, and those false alarms drowned the real ones.
+			if (!readPending && m_readBufferContent == 0) {
 				NoteRead("blockDead", bytesToRead);
 				AddLogLineN(CFormat(wxT("[ecread] Read() blocked with NO read pending, "
 						       "wanted %u, buffered %u -- no re-arm")) %
@@ -875,7 +885,6 @@ public:
 		return CFormat(wxT("ev_posted=%u ev_delivered=%u ev_spurious=%u")) % m_evPosted %
 		       m_evDelivered % m_evSpurious;
 	}
->>>>>>> bb670a946 (diag(asio): observe the read path without changing it)
 
 	// debug: a short history of the read path, so the state at a stall comes
 	// with the sequence that produced it rather than only the end result.

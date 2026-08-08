@@ -333,6 +333,45 @@ void CamuleRemoteGuiApp::OnAssertFailure(
 
 void CamuleRemoteGuiApp::OnPollTimer(wxTimerEvent &)
 {
+	// debug/ec-stall-diag ---------------------------------------------------
+	// The stall shape: requests accumulate past the threshold, the early
+	// return below then fires on every tick, and the UI stops updating while
+	// the socket stays open and nothing reports a loss. Reported when anything
+	// looks abnormal, rate-limited, plus an unconditional heartbeat -- without
+	// the heartbeat, silence during a stall is ambiguous, since the abnormal
+	// lines are emitted from this very timer and stop if the timer does.
+	{
+		static uint64 lastTraceMs = 0;
+		static uint64 lastAliveMs = 0;
+		static bool wasStalled = false;
+		const int reqCount = m_connect->GetReqCount();
+		const size_t fifo = m_connect->GetReqFifoSize();
+		const size_t queued = m_connect->GetOutputQueueDepth();
+		const bool stalled = m_connect->RequestFifoFull();
+		const bool abnormal = stalled || reqCount > 5 || queued > 0;
+		const uint64 nowMs = GetTickCount64();
+		if (abnormal && (nowMs - lastTraceMs >= 10000 || stalled != wasStalled)) {
+			lastTraceMs = nowMs;
+			AddLogLineN(CFormat(wxT("[ectrace] req_count=%d/%d fifo=%u out_queue=%u%s")) % reqCount %
+				    m_connect->GetReqFifoThreshold() % (unsigned)fifo % (unsigned)queued %
+				    (stalled ? wxT("  <-- POLL STALLED, ui will not update") : wxT("")));
+			if (stalled) {
+				AddLogLineN(CFormat(wxT("[ectrace]   read state: %s")) %
+					    m_connect->DescribeReadState());
+			}
+		}
+		if (!abnormal && wasStalled) {
+			AddLogLineN(wxT("[ectrace] recovered: poll resumed"));
+		}
+		wasStalled = stalled;
+		if (nowMs - lastAliveMs >= 300000) {
+			lastAliveMs = nowMs;
+			AddLogLineN(CFormat(wxT("[ectrace] alive req_count=%d/%d fifo=%u out_queue=%u %s")) %
+				    reqCount % m_connect->GetReqFifoThreshold() % (unsigned)fifo %
+				    (unsigned)queued % m_connect->DescribeEventCounters());
+		}
+	}
+
 	static int request_step = 0;
 	static uint32 msPrevStats = 0;
 
@@ -353,6 +392,14 @@ void CamuleRemoteGuiApp::OnPollTimer(wxTimerEvent &)
 	// symptom (nothing answering) rather than waiting for the queue to fill.
 	if (m_connect->GetReqFifoSize() > 0 &&
 		m_connect->MillisecondsSinceLastReply() > EC_REPLY_TIMEOUT_MS) {
+		// debug/ec-stall-diag: what we were waiting on, and whether the reply
+		// ever reached us. Only on this path -- the bookkeeping behind it is
+		// silent in normal operation. Replies are FCFS, so the head of the
+		// list is the request the daemon stopped answering.
+		AddLogLineN(CFormat(wxT("[ectrace] in flight at stall: %s")) %
+			m_connect->DescribePendingRequests());
+		AddLogLineN(CFormat(wxT("[ectrace] read state at stall: %s")) % m_connect->DescribeReadState());
+
 		// Untranslated and debug-level on purpose: the user-facing messaging
 		// already comes from the path this drops into -- OnLost posts
 		// "Connection failure" and BeginReconnect announces the retry, both

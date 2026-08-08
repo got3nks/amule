@@ -92,6 +92,12 @@ private:
 	// Output related data
 	std::list<CQueuedData *> m_output_queue;
 
+public:
+	/// debug/ec-stall-diag: chunks still queued for the socket.
+	size_t GetOutputQueueDepth() const { return m_output_queue.size(); }
+
+protected:
+
 	// zlib (deflation) buffers
 	std::vector<unsigned char> m_in_ptr;
 	std::vector<unsigned char> m_out_ptr;

@@ -590,11 +590,7 @@ private:
 	uint32 m_dbgRequestsSeen = 0;
 	int m_dbgLastOpcode = -1;
 	unsigned m_dbgQuietReports = 0;
-	// This connection's own queue of incoming peer chat messages, drained on
-	// EC_OP_GET_CHAT_MESSAGES. Per-client (not global) so several GUIs each
-	// get their own independent copy — like the partial-update valuemaps.
-	// <sender GUI_ID, "name|message">.
-	s	// File ECIDs sent in the previous response for each EC request path.
+	// File ECIDs sent in the previous response for each EC request path.
 	// Diffed against the current snapshot to compute the removal list emitted
 	// to partial-update-capable clients. Tracked per-path because amulegui
 	// uses `EC_OP_GET_UPDATE` (mixed shared + partfile, served by
