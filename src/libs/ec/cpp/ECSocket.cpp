@@ -153,6 +153,22 @@ int utf8_mb_remain(char c)
 void CQueuedData::Write(const void *data, size_t len)
 {
 	const size_t canWrite = std::min(GetRemLength(), len);
+	// The wxASSERT below cannot report anything: it is compiled out of release
+	// builds and is a silent no-op without a wxApp regardless, so a divergence
+	// here has never been visible. It matters because a request clamped to
+	// zero returns from the socket layer without arming another read, which is
+	// how a connection stops receiving. Logged at full width -- an earlier
+	// version cast this size_t to unsigned and showed only its low 32 bits,
+	// hiding whether the value was merely large or a wrap near 2^64.
+	//
+	// Reported, not corrected: this branch exists to find the cause, so the
+	// behaviour stays exactly as master's.
+	if (canWrite != len) {
+		AddLogLineN(CFormat(wxT("[ecbuf] short read window: wanted %llu, room for %llu "
+				       "(buffer %llu, unread %llu)")) %
+			(unsigned long long)len % (unsigned long long)canWrite %
+			(unsigned long long)GetLength() % (unsigned long long)GetUnreadDataLength());
+	}
 	wxASSERT(len == canWrite);
 
 	memcpy(m_wr_ptr, data, canWrite);
@@ -496,12 +512,29 @@ void CECSocket::OnInput()
 {
 	size_t bytes_rx = 0;
 	do {
+		if (m_bytes_needed == 0 || m_curr_rx_data->GetRemLength() == 0) {
+			AddLogLineN(CFormat(wxT("[ecbuf] OnInput: zero-size read -- want %llu, room %llu, "
+					       "unread %llu")) %
+				(unsigned long long)m_bytes_needed %
+				(unsigned long long)m_curr_rx_data->GetRemLength() %
+				(unsigned long long)m_curr_rx_data->GetUnreadDataLength());
+		}
 		bytes_rx = m_curr_rx_data->ReadFromSocket(this, m_bytes_needed);
 		if (SocketRealError()) {
 			AddDebugLogLineN(logEC, "OnInput: socket error");
 			OnError();
 			// socket already disconnected in this point
 			return;
+		}
+		// The subtraction that can wrap. bytes_rx is supposed to be bounded by
+		// m_bytes_needed, so a larger value means the socket layer returned
+		// more than it was asked for -- and the wrap turns a sane length into
+		// one the header cap has already passed and cannot catch again.
+		if (bytes_rx > m_bytes_needed) {
+			AddLogLineN(CFormat(wxT("[ecbuf] read overrun: got %llu for a %llu-byte request "
+					       "(announced %llu)")) %
+				(unsigned long long)bytes_rx % (unsigned long long)m_bytes_needed %
+				(unsigned long long)m_dbgLastAnnounced);
 		}
 		m_bytes_needed -= bytes_rx;
 
@@ -703,6 +736,7 @@ bool CECSocket::ReadHeader()
 	m_curr_rx_data->Read(&m_curr_packet_len, 4);
 	m_curr_packet_len = ENDIAN_NTOHL(m_curr_packet_len);
 	m_bytes_needed = m_curr_packet_len;
+	m_dbgLastAnnounced = m_curr_packet_len;
 	// Sanity bound on the announced packet size. Pre-auth stays at the
 	// historical 16 MB cap — limits the damage a malicious peer can do
 	// with a single bogus header before we know who they are. Post-auth

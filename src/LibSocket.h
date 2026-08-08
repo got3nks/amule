@@ -119,6 +119,9 @@ public:
 	// never read). See CAsioSocketImpl::DescribeReadState.
 	wxString DescribeReadState() const;
 
+	// Event counters alone, for periodic sampling.
+	wxString DescribeEventCounters() const;
+
 	// Get IP of client
 	const wxChar *GetIP() const;
 

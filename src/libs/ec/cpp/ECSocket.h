@@ -102,6 +102,7 @@ private:
 	uint32_t m_rx_flags;
 	uint32_t m_tx_flags;
 	size_t m_bytes_needed;
+	size_t m_dbgLastAnnounced = 0; // last length ReadHeader accepted
 	bool m_in_header;
 
 	uint32_t m_curr_packet_len;

@@ -1105,6 +1105,20 @@ void ExternalConn::DebugPollEcSockets()
 	const unsigned kFullReports = 6;
 	const unsigned kHeartbeatEvery = 12;
 
+	{
+		static uint64 s_msPrevCounters = 0;
+		const uint64 now = GetTickCount64();
+		if (now - s_msPrevCounters > 300000) {
+			s_msPrevCounters = now;
+			for (CECServerSocket *s : socket_list) {
+				if (s->RequestsSeen() >= kMinRequestsSeen) {
+					AddLogLineN(CFormat(wxT("[ecwatch] alive %s seen=%u %s")) % s->GetPeer() %
+						    s->RequestsSeen() % s->DescribeEventCounters());
+				}
+			}
+		}
+	}
+
 	const uint64 nowMs = GetTickCount64();
 	for (CECServerSocket *s : socket_list) {
 		const uint64 since = nowMs - s->LastRequestMs();

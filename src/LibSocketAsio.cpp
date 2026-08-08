@@ -847,7 +847,35 @@ public:
 	// buffer and the cleared m_readPending -- is visible to the Read() this
 	// notification is about to drive. A plain store leaves the reader free to
 	// see a stale read state and block on data that is already here.
-	void EventProcessed() { m_eventPending.exchange(false, std::memory_order_acquire); }
+	void EventProcessed()
+	{
+		// The clear and the observation are the same operation. Reading the
+		// flag separately to decide "was this spurious?" races with the
+		// posting side and can attribute a delivery to the wrong case; the
+		// exchange returns the value it replaced, so the count describes
+		// exactly the delivery being processed.
+		//
+		// A delivery finding the flag already clear is one nothing posted, or
+		// one delivered twice -- counted separately from a post that never
+		// arrived, because the two explanations differ.
+		const bool wasPending = m_eventPending.exchange(false, std::memory_order_acquire);
+		if (!wasPending) {
+			++m_evSpurious;
+		}
+		NoteRead("recv", 0);
+		++m_evDelivered;
+	}
+
+	/// Counters alone, cheap enough for a periodic heartbeat. They are the
+	/// only part of the read state useful BEFORE a failure: read once at the
+	/// failure, a notification lost moments ago and a drift accumulated over
+	/// hours are indistinguishable.
+	wxString DescribeEventCounters() const
+	{
+		return CFormat(wxT("ev_posted=%u ev_delivered=%u ev_spurious=%u")) % m_evPosted %
+		       m_evDelivered % m_evSpurious;
+	}
+>>>>>>> bb670a946 (diag(asio): observe the read path without changing it)
 
 	// debug: a short history of the read path, so the state at a stall comes
 	// with the sequence that produced it rather than only the end result.
@@ -868,21 +896,35 @@ public:
 		const char *what = "";
 		uint32 arg = 0;
 		uint32 content = 0;
+		uint32 seq = 0;
 		bool pending = false;
 		bool evt = false;
+		bool asio = false;
 	};
+	unsigned m_evPosted = 0;
+	unsigned m_evDelivered = 0;
+	unsigned m_evSpurious = 0;
+
 	static const unsigned kReadTraceLen = 24;
 	ReadTrace m_readTrace[kReadTraceLen];
 	unsigned m_readTraceAt = 0;
 
-	void NoteRead(const char *what, uint32 arg)
+	// A global sequence number, because the ring index alone cannot order
+	// entries written from two threads: they interleave and overwrite, and a
+	// tail read as if ordered says things that never happened.
+	static std::atomic<uint32> s_readSeq;
+
+	void NoteRead(const char *what, uint32 arg, bool asio = false)
 	{
+		const uint32 seq = s_readSeq.fetch_add(1, std::memory_order_relaxed);
 		ReadTrace &t = m_readTrace[m_readTraceAt % kReadTraceLen];
 		t.what = what;
 		t.arg = arg;
 		t.content = m_readBufferContent;
 		t.pending = m_readPending;
 		t.evt = m_eventPending;
+		t.seq = seq;
+		t.asio = asio;
 		++m_readTraceAt;
 	}
 
@@ -893,8 +935,9 @@ public:
 		const unsigned first = m_readTraceAt < kReadTraceLen ? 0 : m_readTraceAt % kReadTraceLen;
 		for (unsigned i = 0; i < n; ++i) {
 			const ReadTrace &t = m_readTrace[(first + i) % kReadTraceLen];
-			out += CFormat(wxT(" %s(%u)[c=%u p=%d e=%d]")) % wxString::FromAscii(t.what) %
-			       t.arg % t.content % (int)t.pending % (int)t.evt;
+			out += CFormat(wxT(" #%u%s:%s(%u)[c=%u p=%d e=%d]")) % t.seq %
+			       (t.asio ? wxT("A") : wxT("M")) % wxString::FromAscii(t.what) % t.arg %
+			       t.content % (int)t.pending % (int)t.evt;
 		}
 		return out.IsEmpty() ? wxString(wxT(" (none)")) : out;
 	}
@@ -927,9 +970,11 @@ public:
 		}
 #endif
 		return CFormat(wxT("kernel_unread=%ld event_pending=%d read_pending=%d "
-				   "buffered=%u blocks_read=%d | recent:%s")) %
+				   "buffered=%u blocks_read=%d ev_posted=%u ev_delivered=%u ev_spurious=%u "
+				   "| recent:%s")) %
 		       avail % (int)m_eventPending % (int)m_readPending %
-		       (unsigned)m_readBufferContent % (int)m_blocksRead % DescribeReadTrace();
+		       (unsigned)m_readBufferContent % (int)m_blocksRead % m_evPosted % m_evDelivered %
+		       m_evSpurious % DescribeReadTrace();
 	}
 
 	void SetWrapSocket(CLibSocket *socket)
@@ -1129,7 +1174,7 @@ private:
 		//
 		m_readPending.store(false, std::memory_order_release);
 		m_blocksRead = false;
-		NoteRead("handleRead", (uint32)bytes_transferred);
+		NoteRead("handleRead", (uint32)bytes_transferred, true);
 		PostReadEvent(2);
 	}
 
@@ -1175,6 +1220,7 @@ private:
 		NoteRead(alreadyPending ? "postSkip" : "post", (uint32)from);
 		if (!alreadyPending) {
 			AddDebugLogLineF(logAsio, CFormat("Post read event %d %s") % from % m_IP);
+			++m_evPosted;
 			CoreNotify_LibSocketReceive(wrapper, m_ErrorCode);
 		}
 	}
@@ -1524,6 +1570,13 @@ bool CLibSocket::BlocksWrite() const
 void CLibSocket::EventProcessed()
 {
 	m_aSocket->EventProcessed();
+}
+
+std::atomic<uint32> CAsioSocketImpl::s_readSeq(0);
+
+wxString CLibSocket::DescribeEventCounters() const
+{
+	return m_aSocket ? m_aSocket->DescribeEventCounters() : wxString(wxT("ev_posted=? ev_delivered=?"));
 }
 
 wxString CLibSocket::DescribeReadState() const
