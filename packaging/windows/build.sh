@@ -92,8 +92,26 @@ build() {
     #                      every libc header check fails.
     # ccache also gets disabled here; on CLANGARM64 it triggered the
     # same family of try_compile crashes that pushed us off Ninja.
+    # A Debug build is only worth handing out if a crash in it can be read
+    # back. aMule's own fatal-exception handler prints a backtrace through
+    # wxStackWalker, which on Windows resolves frames via dbghelp -- and
+    # dbghelp reads CodeView/PDB, not the DWARF clang emits here by default.
+    # So ask for CodeView as well and have lld write a .pdb next to each
+    # binary (empty --pdb= means "derive the name from the output"). Without
+    # this the handler still fires but every frame comes back as a bare
+    # address, which is what the Event Viewer already tells us.
+    local debug_args=()
+    if [[ "${AMULE_BUILD_TYPE:-Release}" == "Debug" ]]; then
+        debug_args=(
+            -DCMAKE_C_FLAGS=-gcodeview
+            -DCMAKE_CXX_FLAGS=-gcodeview
+            -DCMAKE_EXE_LINKER_FLAGS=-Wl,--pdb=
+        )
+    fi
+
     cmake -B "${BUILD_DIR}" -S "${REPO_ROOT}" -G "MinGW Makefiles" \
         -DCMAKE_BUILD_TYPE="${AMULE_BUILD_TYPE:-Release}" \
+        "${debug_args[@]+"${debug_args[@]}"}" \
         -DCMAKE_C_COMPILER_LAUNCHER= \
         -DCMAKE_CXX_COMPILER_LAUNCHER= \
         -DBUILD_MONOLITHIC=YES \
@@ -120,6 +138,15 @@ build() {
     echo "==> Installing portable tree to ${PORTABLE_DIR}"
     rm -rf "${PORTABLE_DIR}"
     cmake --install "${BUILD_DIR}" --prefix "${PORTABLE_DIR}"
+
+    # cmake --install only takes the binaries; the PDBs live next to their
+    # objects in the build tree, and are useless to us unless they travel
+    # with the .exe they describe.
+    if [[ "${AMULE_BUILD_TYPE:-Release}" == "Debug" ]]; then
+        echo "==> Bundling PDBs"
+        find "${BUILD_DIR}" -name '*.pdb' -exec cp {} "${PORTABLE_DIR}/bin/" \; 2>/dev/null || true
+        ls -la "${PORTABLE_DIR}/bin/"*.pdb 2>/dev/null || echo "warning: no PDBs produced"
+    fi
 
     echo "==> Producing ${ZIP_NAME}"
     cd "$(dirname "${PORTABLE_DIR}")"

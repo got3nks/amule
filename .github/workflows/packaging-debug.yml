@@ -269,9 +269,9 @@ jobs:
       matrix:
         include:
           - arch: x64
-            msystem: MINGW64
+            msystem: CLANG64
             runs-on: windows-2025
-            pkg_prefix: mingw-w64-x86_64
+            pkg_prefix: mingw-w64-clang-x86_64
           - arch: arm64
             msystem: CLANGARM64
             runs-on: windows-11-arm
@@ -298,11 +298,11 @@ jobs:
             ${{ matrix.pkg_prefix }}-libgd
             ${{ matrix.pkg_prefix }}-libmaxminddb
             ${{ matrix.pkg_prefix }}-make
+            ${{ matrix.pkg_prefix }}-ninja
             ${{ matrix.pkg_prefix }}-pkgconf
-            ${{ matrix.pkg_prefix }}-pupnp
             ${{ matrix.pkg_prefix }}-readline
             ${{ matrix.pkg_prefix }}-toolchain
-            ${{ matrix.pkg_prefix }}-wxwidgets3.2-msw
+            ${{ matrix.pkg_prefix }}-wxwidgets3.3-msw
             ${{ matrix.pkg_prefix }}-zlib
             git
             zip
@@ -312,18 +312,67 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ runner.os }}-windows-${{ matrix.arch }}-debug-ccache-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
           restore-keys: ${{ runner.os }}-windows-${{ matrix.arch }}-debug-ccache-
+      - name: Zero ccache stats
+        run: ccache --zero-stats
       - name: Configure git safe.directory for MSYS2 git
+        # MSYS2 git (now installed above) uses a global config separate
+        # from the Windows git at C:\Program Files\Git\bin\git.exe that
+        # actions/checkout configures. Without this entry, MSYS2 git
+        # may trip the "dubious ownership" guard on the workspace dir,
+        # which would cause `git describe --tags` inside
+        # packaging/windows/build.sh to fall through the `2>/dev/null
+        # || echo "snapshot"` fallback and produce
+        # aMule-snapshot-Windows-*.zip instead of
+        # aMule-<tag>-Windows-*.zip.
         run: git config --global --add safe.directory '*'
-      - name: Build portable .zip (Debug)
+      # MSYS2 only packages pupnp 1.14.x; build the pinned 22.x from source so
+      # the Windows portable gets the UPnP fixes released in 22.0.4 (issue
+      # #242). Installed into $MINGW_PREFIX so find_package(UPNP CONFIG) picks
+      # it up and build.sh's dependency bundling ships the 22.x DLL.
+      - name: Build libupnp (pupnp) from source
+        run: |
+          set -euo pipefail
+          . packaging/linux/versions.env
+          curl -L -o /tmp/libupnp.tar.gz "$LIBUPNP_TARBALL_URL"
+          echo "$LIBUPNP_SHA256  /tmp/libupnp.tar.gz" | sha256sum -c -
+          mkdir -p /tmp/libupnp
+          tar -xf /tmp/libupnp.tar.gz -C /tmp/libupnp --strip-components=1
+          cmake -S /tmp/libupnp -B /tmp/libupnp/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DUPNP_BUILD_SHARED=ON -DUPNP_BUILD_STATIC=OFF \
+            -DUPNP_BUILD_SAMPLES=OFF -DUPNP_BUILD_TESTS=OFF -Dreuseaddr=ON -Dipv6=ON \
+            -DCMAKE_INSTALL_PREFIX="$MINGW_PREFIX"
+          cmake --build /tmp/libupnp/build
+          cmake --install /tmp/libupnp/build
+      - name: Build portable .zip
         env:
           WINDOWS_MSYSTEM: ${{ matrix.msystem }}
         run: packaging/windows/build.sh
+      - name: Smoke-test amuled.exe --version
+        run: |
+          # Two layered quirks here:
+          # 1. amuled.exe --version exits 255 (wxApp::OnInit returns
+          #    false after banner → wxEntry returns -1). || true
+          #    swallows that.
+          # 2. Piping `amuled.exe ... | grep -q` on MSYS2 bash exits
+          #    127: grep -q closes its pipe end at first match,
+          #    amuled.exe gets SIGPIPE on its next stdout flush, MSYS2
+          #    surfaces that as 127. Capture to a file first, then
+          #    grep the file — no pipe race.
+          ./amule-portable-${{ matrix.arch }}/bin/amuled.exe --version \
+              > /tmp/version.txt 2>&1 || true
+          cat /tmp/version.txt
+          # Pattern accepts the dev placeholder ("aMuleD GIT ...") and
+          # any tagged-release banner ("aMuleD 3.0.0 ...", etc.).
+          grep -q '^aMuleD ' /tmp/version.txt
       - name: Save ccache
-        if: always()
+        if: always() && github.event_name != 'workflow_call'
         uses: actions/cache/save@v6
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ runner.os }}-windows-${{ matrix.arch }}-debug-ccache-${{ github.run_id }}
+      - name: ccache stats
+        if: always() && github.event_name != 'workflow_call'
+        run: ccache --show-stats
       - name: Label artifact -debug
         run: |
           for f in dist/aMule-*-Windows-${{ matrix.arch }}.zip; do
@@ -335,3 +384,15 @@ jobs:
           name: windows-${{ matrix.arch }}-debug
           path: dist/aMule-*-Windows-${{ matrix.arch }}-debug.zip
           if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Windows — NSIS installer .exe for x64 and ARM64.
+  #
+  # msystem here is only the shell the job runs in: the step installs bare
+  # git/unzip/python and wraps an already-built payload, so it needs no
+  # compiler and does not have to match the environment windows-zip built in.
+  # Consumes the portable tree built by windows-zip rather than building
+  # it a second time. Coupling is correct here: with no payload there's
+  # nothing to wrap, so a windows-zip failure should skip the installer.
+  # ------------------------------------------------------------------
+
