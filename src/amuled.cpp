@@ -87,6 +87,13 @@ namespace
 std::map<int, std::pair<unsigned, unsigned long long>> g_dbgEventTotals;
 unsigned long long g_dbgEventTotalMs = 0;
 
+// The longest stretch in the window where the main thread dispatched nothing,
+// and what it dispatched on coming back. Handler time is already accounted
+// for; this accounts for the rest, which is where these stalls actually live.
+uint64 g_dbgLastEventEndMs = 0;
+uint64 g_dbgMaxIdleGapMs = 0;
+int g_dbgMaxIdleGapNextType = 0;
+
 const char *DbgEventName(int t)
 {
 	if (t == MULE_EVT_NOTIFY) {
@@ -117,6 +124,19 @@ void DbgNoteEvent(int eventType, unsigned long long tookMs)
 	slot.first++;
 	slot.second += tookMs;
 	g_dbgEventTotalMs += tookMs;
+}
+
+wxString DbgDrainIdleGap()
+{
+	wxString out;
+	if (g_dbgMaxIdleGapMs != 0) {
+		out = CFormat(wxT("longest idle gap %llums then %s(type=%d)")) %
+		      (unsigned long long)g_dbgMaxIdleGapMs % DbgEventName(g_dbgMaxIdleGapNextType) %
+		      g_dbgMaxIdleGapNextType;
+	}
+	g_dbgMaxIdleGapMs = 0;
+	g_dbgMaxIdleGapNextType = 0;
+	return out;
 }
 
 wxString DbgDrainEventTotals()
@@ -152,8 +172,17 @@ wxString DbgDrainEventTotals()
 bool CamuleDaemonApp::ProcessEvent(wxEvent &event)
 {
 	const uint64 start = GetTickCount64();
+	if (g_dbgLastEventEndMs != 0) {
+		const uint64 idle = start - g_dbgLastEventEndMs;
+		if (idle > g_dbgMaxIdleGapMs) {
+			g_dbgMaxIdleGapMs = idle;
+			g_dbgMaxIdleGapNextType = event.GetEventType();
+		}
+	}
 	const bool handled = CamuleApp::ProcessEvent(event);
-	const uint64 took = GetTickCount64() - start;
+	const uint64 end = GetTickCount64();
+	const uint64 took = end - start;
+	g_dbgLastEventEndMs = end;
 	// Accumulate EVERY event, not just slow ones. The per-event threshold
 	// below cannot see a stall made of many cheap events -- a hundred at 40ms
 	// apiece is four seconds and never trips it -- and under I/O contention

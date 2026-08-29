@@ -840,6 +840,7 @@ void DbgNoteEvent(int eventType, unsigned long long tookMs);
 /// nothing was dispatched -- which is itself the interesting answer, because it
 /// puts the block outside event dispatch entirely.
 wxString DbgDrainEventTotals();
+wxString DbgDrainIdleGap();
 
 class CamuleDaemonApp : public CamuleApp
 {

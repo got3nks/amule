@@ -30,6 +30,16 @@ class CTimerThread;
 
 #include <wx/event.h>
 
+#include "Types.h"
+
+// debug/ec-stall-diags: the core timer runs on its own thread, so a missing
+// tick has two very different causes -- the thread never queued the event, or
+// it queued it and the main loop never dispatched it. These let the [ecloop]
+// report say which. Written from the timer thread, read from the main one.
+uint64 DbgTimerMaxLateMs();
+unsigned DbgTimerLateCount();
+void DbgTimerDrainLate();
+
 /**
  * Replacement for wxTimer as it doesn't work on non-X builds
  */
@@ -73,6 +83,11 @@ public:
 	CTimerEvent(int id = 0);
 
 	virtual wxEvent *Clone() const;
+
+	// debug/ec-stall-diags: GetTickCount64() at wxQueueEvent time. The delta
+	// to dispatch is the main loop's own queue latency, which is the one
+	// number that tells a blocked loop apart from a starved timer thread.
+	uint64 m_dbgQueuedAt = 0;
 };
 
 wxDECLARE_EVENT(MULE_EVT_TIMER, wxEvent);

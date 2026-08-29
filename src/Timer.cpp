@@ -24,7 +24,32 @@
 
 #include "Timer.h"        // Interface declaration
 #include "GetTickCount.h" // Needed for GetTickCount
-#include "MuleThread.h"   // Needed for CMuleThread
+#include <atomic>
+
+#include "MuleThread.h" // Needed for CMuleThread
+
+namespace
+{
+// Written from the timer thread, read/cleared from the main thread.
+std::atomic<uint64> g_dbgTimerMaxLateMs(0);
+std::atomic<unsigned> g_dbgTimerLateCount(0);
+} // namespace
+
+uint64 DbgTimerMaxLateMs()
+{
+	return g_dbgTimerMaxLateMs.load();
+}
+
+unsigned DbgTimerLateCount()
+{
+	return g_dbgTimerLateCount.load();
+}
+
+void DbgTimerDrainLate()
+{
+	g_dbgTimerMaxLateMs.store(0);
+	g_dbgTimerLateCount.store(0);
+}
 
 //////////////////////// Timer Thread ////////////////////
 
@@ -63,10 +88,26 @@ public:
 			// interrupt by posting to the semaphore.  So, it follows
 			// that if we do acquire the semaphore it means the owner
 			// wants us to exit.
-			if (m_sleepSemaphore.WaitTimeout(timeout) == wxSEMA_TIMEOUT) {
+			// debug/ec-stall-diags: how long the wait ACTUALLY took. If this
+			// thread is descheduled -- the whole process starved by host I/O,
+			// say -- no tick is queued and the main loop looks stalled while
+			// being merely idle. Recording the overshoot separates the two.
+			const uint64 waitStart = GetTickCount64();
+			const wxSemaError rc = m_sleepSemaphore.WaitTimeout(timeout);
+			const uint64 waited = GetTickCount64() - waitStart;
+			if (waited > (uint64)timeout + 500) {
+				const uint64 late = waited - (uint64)timeout;
+				uint64 prev = g_dbgTimerMaxLateMs.load();
+				while (late > prev &&
+					!g_dbgTimerMaxLateMs.compare_exchange_weak(prev, late)) {
+				}
+				g_dbgTimerLateCount++;
+			}
+			if (rc == wxSEMA_TIMEOUT) {
 				// Increment for one event only, so no events can be lost.
 				lastEvent += m_period;
 
+				evt.m_dbgQueuedAt = GetTickCount64();
 				wxQueueEvent(m_owner, (evt).Clone());
 			} else {
 				break;
@@ -149,7 +190,9 @@ CTimerEvent::CTimerEvent(int id)
 
 wxEvent *CTimerEvent::Clone() const
 {
-	return new CTimerEvent(GetId());
+	CTimerEvent *cloned = new CTimerEvent(GetId());
+	cloned->m_dbgQueuedAt = m_dbgQueuedAt;
+	return cloned;
 }
 
 // File_checked_for_headers

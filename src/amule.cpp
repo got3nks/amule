@@ -1980,7 +1980,7 @@ private:
 };
 } // namespace
 
-void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
+void CamuleApp::OnCoreTimer(CTimerEvent &evt)
 {
 	// Former TimerProc section
 	static uint64 msPrev1, msPrev5, msPrevSave, msPrevHist, msPrevOS, msPrevKnownMet;
@@ -2019,12 +2019,41 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 				// "no events dispatched" is the informative answer, not a
 				// failure: it puts the block outside event dispatch entirely.
 				const wxString totals = DbgDrainEventTotals();
-				AddLogLineN(CFormat(wxT("[ecloop] main loop stalled %llums; dispatched %s")) %
-					    (unsigned long long)gap %
-					    (totals.IsEmpty() ? wxString(wxT("no events")) : totals));
+				const wxString idle = DbgDrainIdleGap();
+				// Split the gap three ways, because "dispatched 5ms of an
+				// 8000ms stall" says only that the block is not in a handler.
+				//
+				//   queue latency  -- this tick was queued on time and sat
+				//                     undelivered => the loop was blocked.
+				//   timer lateness -- the timer thread itself was descheduled
+				//                     => the process was starved and the loop
+				//                     was idle, not stuck.
+				//   idle gap       -- the longest stretch dispatching nothing,
+				//                     and what ran next.
+				//
+				// The first two are near-exclusive, so the pair identifies
+				// which of the two failures happened instead of leaving it to
+				// inference.
+				const uint64 queueLatency =
+					(evt.m_dbgQueuedAt != 0 && nowTick > evt.m_dbgQueuedAt)
+						? (nowTick - evt.m_dbgQueuedAt)
+						: 0;
+				const uint64 timerLate = DbgTimerMaxLateMs();
+				const unsigned timerLateN = DbgTimerLateCount();
+				DbgTimerDrainLate();
+				AddLogLineN(
+					CFormat(wxT(
+						"[ecloop] main loop stalled %llums; queued %llums ago; timer "
+						"thread late %llums x%u; %s; dispatched %s")) %
+					(unsigned long long)gap % (unsigned long long)queueLatency %
+					(unsigned long long)timerLate % timerLateN %
+					(idle.IsEmpty() ? wxString(wxT("no idle gap")) : idle) %
+					(totals.IsEmpty() ? wxString(wxT("no events")) : totals));
 			} else {
 				// Keep the window aligned with the gap being measured.
 				DbgDrainEventTotals();
+				DbgDrainIdleGap();
+				DbgTimerDrainLate();
 			}
 		}
 		s_lastTickMs = nowTick;
