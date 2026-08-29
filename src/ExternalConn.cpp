@@ -465,6 +465,26 @@ public:
 	/// lifetime.
 	unsigned NoteQuietReport() { return ++m_dbgQuietReports; }
 	void ResetQuietReports() { m_dbgQuietReports = 0; }
+	unsigned DbgSerial() const { return m_dbgSerial; }
+	/// True when `state` differs from the last one we printed, and remembers
+	/// it. Lets the watchdog keep a per-tick summary while emitting the bulky
+	/// trace only when something actually moved.
+	bool NoteReadStateChanged(const wxString &state)
+	{
+		if (state == m_dbgLastReadState) {
+			return false;
+		}
+		m_dbgLastReadState = state;
+		return true;
+	}
+	/// Name this socket in a log line: peer plus the serial that distinguishes
+	/// it from the previous connection of the same client.
+	wxString DbgName() { return CFormat(wxT("%s#%u")) % GetPeer() % m_dbgSerial; }
+	/// The opcode this socket's handler is inside, and for how long. -1 when
+	/// it is not in one. This is what turns "the main loop is stuck" into "the
+	/// main loop is stuck in op 0xNN for client X".
+	int InHandlerOpcode() const { return m_dbgInHandlerOpcode; }
+	uint64 InHandlerSinceMs() const { return m_dbgInHandlerSinceMs; }
 
 private:
 	ECNotifier *m_ec_notifier;
@@ -590,6 +610,18 @@ private:
 	uint32 m_dbgRequestsSeen = 0;
 	int m_dbgLastOpcode = -1;
 	unsigned m_dbgQuietReports = 0;
+	// Identity for the log. GetPeer() is the client's address, which is not
+	// unique -- a reconnecting client reuses it, and the old socket is often
+	// still being reaped when the new one arrives. Without a serial, a line
+	// naming only the peer cannot say WHICH of the two it is about, and the
+	// accept/bail/close sequence during a reconnect storm is unreadable.
+	unsigned m_dbgSerial = 0;
+	wxString m_dbgLastReadState;
+	// What this socket's request handler is doing right now, and since when.
+	// Zero start means "not inside a handler". Read by the watchdog on the
+	// same thread, so plain members rather than atomics.
+	int m_dbgInHandlerOpcode = -1;
+	uint64 m_dbgInHandlerSinceMs = 0;
 	// File ECIDs sent in the previous response for each EC request path.
 	// Diffed against the current snapshot to compute the removal list emitted
 	// to partial-update-capable clients. Tracked per-path because amulegui
@@ -680,6 +712,11 @@ CECServerSocket::CECServerSocket(ECNotifier *notifier)
 , m_searchProgressUnionActive(false)
 , m_chatActive(false)
 {
+	// Monotonic per-process, so a reconnect is visibly a different socket even
+	// though the peer address is identical.
+	static unsigned s_dbgSerialCounter = 0;
+	m_dbgSerial = ++s_dbgSerialCounter;
+
 	wxASSERT(theApp->ECServerHandler);
 	theApp->ECServerHandler->AddSocket(this);
 	m_ec_notifier = notifier;
@@ -887,6 +924,24 @@ const CECPacket *CECServerSocket::OnPacketReceived(const CECPacket *packet, uint
 	m_dbgRequestsSeen++;
 	m_dbgLastOpcode = (int)packet->GetOpCode();
 
+	// Bracket the whole of this request. The watchdog runs on this same thread
+	// from the core timer, so it can only observe these while we are BETWEEN
+	// requests -- which is exactly the point: if the timer manages to run and
+	// finds a socket still inside a handler, that handler is not the one
+	// blocking it. If the timer does not run at all, the main-loop heartbeat
+	// below says so and this names what it was last inside.
+	m_dbgInHandlerOpcode = (int)packet->GetOpCode();
+	m_dbgInHandlerSinceMs = m_dbgLastRequestMs;
+	struct InHandlerScope
+	{
+		CECServerSocket *s;
+		~InHandlerScope()
+		{
+			s->m_dbgInHandlerOpcode = -1;
+			s->m_dbgInHandlerSinceMs = 0;
+		}
+	} inHandlerScope{ this };
+
 	const CECPacket *reply = NULL;
 
 	if (m_conn_state == CONN_FAILED) {
@@ -921,7 +976,9 @@ const CECPacket *CECServerSocket::OnPacketReceived(const CECPacket *packet, uint
 
 void CECServerSocket::OnLost()
 {
-	AddLogLineN(_("External connection closed."));
+	// Named, because during a reconnect storm this interleaves with accepts of
+	// the SAME peer address and the untagged line cannot say which socket died.
+	AddLogLineN(CFormat(wxT("%s [%s]")) % _("External connection closed.") % DbgName());
 	theApp->ECServerHandler->m_ec_notifier->Remove_EC_Client(this);
 	DestroySocket();
 }
@@ -1108,8 +1165,9 @@ void ExternalConn::DebugPollEcSockets()
 			s_msPrevCounters = now;
 			for (CECServerSocket *s : socket_list) {
 				if (s->RequestsSeen() >= kMinRequestsSeen) {
-					AddLogLineN(CFormat(wxT("[ecwatch] alive %s seen=%u %s")) % s->GetPeer() %
-						    s->RequestsSeen() % s->DescribeEventCounters());
+					AddLogLineN(CFormat(wxT("[ecwatch] alive %s seen=%u %s")) %
+						    s->DbgName() % s->RequestsSeen() %
+						    s->DescribeEventCounters());
 				}
 			}
 		}
@@ -1126,9 +1184,31 @@ void ExternalConn::DebugPollEcSockets()
 		if (n > kFullReports && (n % kHeartbeatEvery) != 0) {
 			continue;
 		}
-		AddLogLineN(CFormat(wxT("[ecwatch] %s quiet %llums  last_op=0x%02x seen=%u  %s")) %
-			    s->GetPeer() % (unsigned long long)since % (unsigned)s->LastOpcode() %
-			    s->RequestsSeen() % s->DescribeReadState());
+		// One line always; the ~25-entry trace only when the read state has
+		// actually moved since we last printed it. A wedged socket repeats the
+		// same trace verbatim every tick, and three clients doing that through
+		// a multi-minute stall is most of the log -- which makes the one
+		// transition that matters harder to find, not easier. The summary
+		// still shows the counters are frozen; the trace is what stops
+		// repeating.
+		const wxString readState = s->DescribeReadState();
+		const bool changed = s->NoteReadStateChanged(readState);
+		// Only ever set if the watchdog managed to run while a handler was
+		// still executing -- which itself says the loop is not wedged in that
+		// handler. Worth printing precisely because it is the case that
+		// exonerates one.
+		wxString inHandler;
+		if (s->InHandlerOpcode() >= 0) {
+			inHandler = CFormat(wxT("  IN HANDLER op=0x%02x for %llums")) %
+				    (unsigned)s->InHandlerOpcode() %
+				    (unsigned long long)(nowMs - s->InHandlerSinceMs());
+		}
+		AddLogLineN(CFormat(wxT("[ecwatch] %s quiet %llums  last_op=0x%02x seen=%u%s")) %
+			    s->DbgName() % (unsigned long long)since % (unsigned)s->LastOpcode() %
+			    s->RequestsSeen() % inHandler);
+		if (changed) {
+			AddLogLineN(CFormat(wxT("[ecwatch]   %s read state: %s")) % s->DbgName() % readState);
+		}
 	}
 }
 

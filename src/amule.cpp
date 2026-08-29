@@ -1950,6 +1950,36 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 	uint64 msCur = theStats::GetUptimeMillis();
 	TheTime = msCur / 1000;
 
+	// debug/ec-stall-diags: main-loop heartbeat.
+	//
+	// The EC watchdog can already see that events were posted and not
+	// delivered, which SUGGESTS the main thread is stuck -- but it cannot tell
+	// that apart from an asio layer that stopped posting. This timer is driven
+	// by the same event loop those events are delivered on, so the gap since
+	// its last tick measures the loop's own stall directly. It is the
+	// difference between "the daemon was blocked for 30 s" as an inference and
+	// as a measurement.
+	//
+	// Reported here rather than by the watchdog below because a long enough
+	// stall may keep the watchdog from running at all; this fires on the first
+	// tick after the loop is released, which is the moment the evidence
+	// exists.
+	{
+		static uint64 s_lastTickMs = 0;
+		const uint64 nowTick = GetTickCount64();
+		if (s_lastTickMs != 0) {
+			const uint64 gap = nowTick - s_lastTickMs;
+			// The timer is nominally ~100 ms. A second is far outside normal
+			// scheduling jitter and well below the client watchdogs, so this
+			// stays silent in health and speaks before anyone disconnects.
+			if (gap >= 1000) {
+				AddLogLineN(CFormat(wxT("[ecloop] main loop stalled %llums")) %
+					    (unsigned long long)gap);
+			}
+		}
+		s_lastTickMs = nowTick;
+	}
+
 	if (!IsRunning()) {
 		return;
 	}

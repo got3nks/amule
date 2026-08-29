@@ -25,6 +25,7 @@
 
 #include "ECSocket.h"
 
+#include <chrono>
 #include <sstream>
 #include <iostream>
 #include <algorithm>
@@ -165,9 +166,9 @@ void CQueuedData::Write(const void *data, size_t len)
 	// behaviour stays exactly as master's.
 	if (canWrite != len) {
 		AddLogLineN(CFormat(wxT("[ecbuf] short read window: wanted %llu, room for %llu "
-				       "(buffer %llu, unread %llu)")) %
-			(unsigned long long)len % (unsigned long long)canWrite %
-			(unsigned long long)GetLength() % (unsigned long long)GetUnreadDataLength());
+					"(buffer %llu, unread %llu)")) %
+			    (unsigned long long)len % (unsigned long long)canWrite %
+			    (unsigned long long)GetLength() % (unsigned long long)GetUnreadDataLength());
 	}
 	wxASSERT(len == canWrite);
 
@@ -514,10 +515,10 @@ void CECSocket::OnInput()
 	do {
 		if (m_bytes_needed == 0 || m_curr_rx_data->GetRemLength() == 0) {
 			AddLogLineN(CFormat(wxT("[ecbuf] OnInput: zero-size read -- want %llu, room %llu, "
-					       "unread %llu")) %
-				(unsigned long long)m_bytes_needed %
-				(unsigned long long)m_curr_rx_data->GetRemLength() %
-				(unsigned long long)m_curr_rx_data->GetUnreadDataLength());
+						"unread %llu")) %
+				    (unsigned long long)m_bytes_needed %
+				    (unsigned long long)m_curr_rx_data->GetRemLength() %
+				    (unsigned long long)m_curr_rx_data->GetUnreadDataLength());
 		}
 		bytes_rx = m_curr_rx_data->ReadFromSocket(this, m_bytes_needed);
 		if (SocketRealError()) {
@@ -532,9 +533,9 @@ void CECSocket::OnInput()
 		// one the header cap has already passed and cannot catch again.
 		if (bytes_rx > m_bytes_needed) {
 			AddLogLineN(CFormat(wxT("[ecbuf] read overrun: got %llu for a %llu-byte request "
-					       "(announced %llu)")) %
-				(unsigned long long)bytes_rx % (unsigned long long)m_bytes_needed %
-				(unsigned long long)m_dbgLastAnnounced);
+						"(announced %llu)")) %
+				    (unsigned long long)bytes_rx % (unsigned long long)m_bytes_needed %
+				    (unsigned long long)m_dbgLastAnnounced);
 		}
 		m_bytes_needed -= bytes_rx;
 
@@ -564,8 +565,52 @@ void CECSocket::OnInput()
 	} while (bytes_rx);
 }
 
+namespace
+{
+// Monotonic milliseconds, local to this file. libec is linked into amulecmd,
+// amuleweb and amuleapi as well as the daemon, so the diag timer must not drag
+// an amule-side header in behind it.
+uint64 DbgNowMs()
+{
+	using namespace std::chrono;
+	return (uint64)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+} // namespace
+
 void CECSocket::OnOutput()
 {
+	// debug/ec-stall-diags: time the whole drain.
+	//
+	// The event-driven path yields on backpressure (see the zero-write case
+	// below), but the SYNCHRONOUS path answers it with WaitSocketWrite(10, 0)
+	// -- a ten-second block on whatever thread this is -- and the WouldBlock
+	// branch `continue`s straight back into another one. On the daemon that
+	// thread is the one every EC client is served from, so a single
+	// back-pressured peer can stall all of them for tens of seconds. That is
+	// the shape of the stalls we are chasing; this measures it instead of
+	// assuming it.
+	const uint64 dbgOutStart = DbgNowMs();
+	unsigned dbgWaits = 0;
+	struct OutputScope
+	{
+		const uint64 &start;
+		unsigned &waits;
+		bool useEvents;
+		~OutputScope()
+		{
+			const uint64 took = DbgNowMs() - start;
+			// Silent in health: an ordinary drain is sub-millisecond. 250 ms
+			// is far past that and far below the clients' own watchdogs, so
+			// this speaks well before anyone disconnects.
+			if (took >= 250) {
+				AddLogLineN(
+					CFormat(wxT("[ecwrite] OnOutput took %llums, %u blocking wait(s), "
+						    "events=%d")) %
+					(unsigned long long)took % waits % (int)useEvents);
+			}
+		}
+	} dbgOutputScope{ dbgOutStart, dbgWaits, m_use_events };
+
 	while (!m_output_queue.empty()) {
 		CQueuedData *data = m_output_queue.front();
 		uint32 written = data->WriteToSocket(this);
@@ -586,6 +631,7 @@ void CECSocket::OnOutput()
 				return;
 			}
 			// Synchronous call: wait (for max 10 secs)
+			++dbgWaits;
 			if (!WaitSocketWrite(10, 0)) {
 				// Still not through ?
 				if (WouldBlock()) {
@@ -619,6 +665,7 @@ void CECSocket::OnOutput()
 			}
 			// Synchronous path: same fallback as the SocketError
 			// case below.
+			++dbgWaits;
 			if (!WaitSocketWrite(10, 0)) {
 				AddDebugLogLineN(
 					logEC, "OnOutput: 10s wait elapsed in zero-write backpressure");

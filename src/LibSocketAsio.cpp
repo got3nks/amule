@@ -657,7 +657,8 @@ public:
 			// because it should be unreachable and, if it is reached, it
 			// is a connection that hangs rather than one that fails.
 			NoteRead("read0", 0);
-			AddLogLineN(wxT("[ecread] Read() asked for zero bytes -- no re-arm"));
+			AddLogLineN(
+				CFormat(wxT("[ecread] %s Read() asked for zero bytes -- no re-arm")) % m_IP);
 			return 0;
 		}
 
@@ -669,8 +670,10 @@ public:
 			// Also returns without arming. Normally the lost-event path has
 			// already fired, but if it has not this is a silent hang too.
 			NoteRead("readErr", bytesToRead);
-			AddLogLineN(CFormat(wxT("[ecread] Read() bailed on error %d, wanted %u -- no re-arm")) %
-				m_ErrorCode % bytesToRead);
+			AddLogLineN(
+				CFormat(wxT(
+					"[ecread] %s Read() bailed on error %d, wanted %u -- no re-arm")) %
+				m_IP % m_ErrorCode % bytesToRead);
 			AddDebugLogLineF(logAsio, CFormat("Read1 %s %d - Error") % m_IP % bytesToRead);
 			return 0;
 		}
@@ -697,9 +700,9 @@ public:
 			// as a dead socket, and those false alarms drowned the real ones.
 			if (!readPending && m_readBufferContent == 0) {
 				NoteRead("blockDead", bytesToRead);
-				AddLogLineN(CFormat(wxT("[ecread] Read() blocked with NO read pending, "
-						       "wanted %u, buffered %u -- no re-arm")) %
-					bytesToRead % (unsigned)m_readBufferContent);
+				AddLogLineN(CFormat(wxT("[ecread] %s Read() blocked with NO read pending, "
+							"wanted %u, buffered %u -- no re-arm")) %
+					    m_IP % bytesToRead % (unsigned)m_readBufferContent);
 			} else {
 				NoteRead("block", bytesToRead);
 			}
@@ -981,9 +984,8 @@ public:
 		return CFormat(wxT("kernel_unread=%ld event_pending=%d read_pending=%d "
 				   "buffered=%u blocks_read=%d ev_posted=%u ev_delivered=%u ev_spurious=%u "
 				   "| recent:%s")) %
-		       avail % (int)m_eventPending % (int)m_readPending %
-		       (unsigned)m_readBufferContent % (int)m_blocksRead % m_evPosted % m_evDelivered %
-		       m_evSpurious % DescribeReadTrace();
+		       avail % (int)m_eventPending % (int)m_readPending % (unsigned)m_readBufferContent %
+		       (int)m_blocksRead % m_evPosted % m_evDelivered % m_evSpurious % DescribeReadTrace();
 	}
 
 	void SetWrapSocket(CLibSocket *socket)
