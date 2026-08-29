@@ -2010,8 +2010,21 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 			// scheduling jitter and well below the client watchdogs, so this
 			// stays silent in health and speaks before anyone disconnects.
 			if (gap >= 1000) {
-				AddLogLineN(CFormat(wxT("[ecloop] main loop stalled %llums")) %
-					    (unsigned long long)gap);
+				// Attribute the gap. Without this the report says only that
+				// time vanished; with it, a stall built from many ordinary
+				// events is visible as such -- which a per-event threshold
+				// structurally cannot show, and which is the expected shape
+				// when every handler's stats are slowed by a saturated disk.
+				//
+				// "no events dispatched" is the informative answer, not a
+				// failure: it puts the block outside event dispatch entirely.
+				const wxString totals = DbgDrainEventTotals();
+				AddLogLineN(CFormat(wxT("[ecloop] main loop stalled %llums; dispatched %s")) %
+					    (unsigned long long)gap %
+					    (totals.IsEmpty() ? wxString(wxT("no events")) : totals));
+			} else {
+				// Keep the window aligned with the gap being measured.
+				DbgDrainEventTotals();
 			}
 		}
 		s_lastTickMs = nowTick;

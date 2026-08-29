@@ -62,6 +62,9 @@
 #include "GuiEvents.h"    // Needed for EVT_MULE_NOTIFY
 #include "Timer.h"        // Needed for EVT_MULE_TIMER
 #include "GetTickCount.h" // Needed for GetTickCount64 (diag timing)
+#include <algorithm>
+#include <map>
+#include <vector>
 
 #include "ClientUDPSocket.h" // Do_not_auto_remove (forward declaration not enough)
 #include "ListenSocket.h"    // Do_not_auto_remove (forward declaration not enough)
@@ -77,6 +80,69 @@
 #include <wx/ffile.h>
 #endif
 
+namespace
+{
+// Keyed by wxEventType. Touched only from the main thread (every writer is a
+// dispatch on it, and the drain runs from the core timer), so no locking.
+std::map<int, std::pair<unsigned, unsigned long long>> g_dbgEventTotals;
+unsigned long long g_dbgEventTotalMs = 0;
+
+const char *DbgEventName(int t)
+{
+	if (t == MULE_EVT_NOTIFY) {
+		return "MuleNotify";
+	}
+	if (t == MULE_EVT_HASHING) {
+		return "FinishedHashing";
+	}
+	if (t == MULE_EVT_AICH_HASHING) {
+		return "FinishedAICHHashing";
+	}
+	if (t == MULE_EVT_FILE_COMPLETED) {
+		return "FinishedCompletion";
+	}
+	if (t == MULE_EVT_ALLOC_FINISHED) {
+		return "FinishedAllocation";
+	}
+	if (t == MULE_EVT_TIMER) {
+		return "MuleTimer";
+	}
+	return "?";
+}
+} // namespace
+
+void DbgNoteEvent(int eventType, unsigned long long tookMs)
+{
+	auto &slot = g_dbgEventTotals[eventType];
+	slot.first++;
+	slot.second += tookMs;
+	g_dbgEventTotalMs += tookMs;
+}
+
+wxString DbgDrainEventTotals()
+{
+	wxString out;
+	if (!g_dbgEventTotals.empty()) {
+		// Busiest first: the line is read to find what dominated the gap, and
+		// a long tail of one-offs should not push it off the front.
+		std::vector<std::pair<int, std::pair<unsigned, unsigned long long>>> v(
+			g_dbgEventTotals.begin(), g_dbgEventTotals.end());
+		std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) {
+			return a.second.second > b.second.second;
+		});
+		for (size_t i = 0; i < v.size() && i < 6; ++i) {
+			out += CFormat(wxT(" %s(type=%d) n=%u %llums;")) % DbgEventName(v[i].first) %
+			       v[i].first % v[i].second.first % v[i].second.second;
+		}
+		out = CFormat(wxT("%llums across %zu type(s):")) % g_dbgEventTotalMs %
+			      g_dbgEventTotals.size() +
+		      out;
+	}
+	g_dbgEventTotals.clear();
+	g_dbgEventTotalMs = 0;
+	return out;
+}
+
 // debug/ec-stall-diags: see the declaration in amule.h for why this is here.
 //
 // Names the event by its numeric type plus the well-known ones spelled out,
@@ -88,6 +154,13 @@ bool CamuleDaemonApp::ProcessEvent(wxEvent &event)
 	const uint64 start = GetTickCount64();
 	const bool handled = CamuleApp::ProcessEvent(event);
 	const uint64 took = GetTickCount64() - start;
+	// Accumulate EVERY event, not just slow ones. The per-event threshold
+	// below cannot see a stall made of many cheap events -- a hundred at 40ms
+	// apiece is four seconds and never trips it -- and under I/O contention
+	// that is the expected shape, since each handler does a few stats that are
+	// individually unremarkable. DbgNoteEvent lets the [ecloop] report
+	// attribute the whole gap instead of only its outliers.
+	DbgNoteEvent(event.GetEventType(), took);
 	if (took >= 250) {
 		const wxEventType t = event.GetEventType();
 		const char *name = "?";

@@ -829,6 +829,18 @@ extern CamuleGuiApp *theApp;
 
 #else /* ! AMULE_DAEMON */
 
+// debug/ec-stall-diags: per-tick event accounting, shared between the daemon's
+// ProcessEvent (which records) and OnCoreTimer's stall report (which drains).
+//
+// A stall does not have to be one slow handler; it can be a hundred ordinary
+// ones made slow together by a saturated filesystem. Totals attribute the whole
+// gap, which a per-event threshold structurally cannot.
+void DbgNoteEvent(int eventType, unsigned long long tookMs);
+/// Render and clear what has accumulated since the last call. Empty string when
+/// nothing was dispatched -- which is itself the interesting answer, because it
+/// puts the block outside event dispatch entirely.
+wxString DbgDrainEventTotals();
+
 class CamuleDaemonApp : public CamuleApp
 {
 private:
