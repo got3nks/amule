@@ -1943,6 +1943,43 @@ void CamuleApp::OnTCPTimer(CTimerEvent &WXUNUSED(evt))
 	serverconnect->ConnectToAnyServer();
 }
 
+namespace
+{
+// debug/ec-stall-diags: name the main-loop section that blocked.
+//
+// [ecloop] proves the loop stalls; it cannot say where. Three candidates have
+// already been eliminated by instruments that stayed silent (the EC write path,
+// the EC request handlers, shared-file removal), so rather than guess a fourth,
+// this times the loop's own calls and reports whichever one ran long.
+//
+// A stall shows up as ONE of these lines naming the culprit, or as none at all
+// -- which would mean the block is outside the timer entirely, in some other wx
+// event handler, and is itself worth knowing.
+//
+// Cost per section is two clock reads. Silent below 250ms.
+class DbgSection
+{
+public:
+	explicit DbgSection(const char *name)
+	: m_name(name)
+	, m_start(GetTickCount64())
+	{
+	}
+	~DbgSection()
+	{
+		const uint64 took = GetTickCount64() - m_start;
+		if (took >= 250) {
+			AddLogLineN(CFormat(wxT("[ecsection] %s took %llums")) % m_name %
+				    (unsigned long long)took);
+		}
+	}
+
+private:
+	const char *m_name;
+	uint64 m_start;
+};
+} // namespace
+
 void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 {
 	// Former TimerProc section
@@ -2042,8 +2079,14 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 	}
 	recurse = true;
 
-	uploadqueue->Process();
-	downloadqueue->Process();
+	{
+		DbgSection dbg("uploadqueue->Process");
+		uploadqueue->Process();
+	}
+	{
+		DbgSection dbg("downloadqueue->Process");
+		downloadqueue->Process();
+	}
 	// theApp->clientcredits->Process();
 	theStats::CalculateRates();
 
@@ -2055,7 +2098,10 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 		// correctly as time progresses.
 		msPrevHist += 1000;
 
-		m_statistics->RecordHistory();
+		{
+			DbgSection dbg("statistics->RecordHistory");
+			m_statistics->RecordHistory();
+		}
 	}
 
 	if (msCur - msPrev1 > 1000) { // approximately every second
@@ -2068,11 +2114,23 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 		if (freeSpaceThread) {
 			freeSpaceThread->SetPaths(thePrefs::GetTempDir(), thePrefs::GetIncomingDir());
 		}
-		clientcredits->Process();
-		clientlist->Process();
+		{
+			DbgSection dbg("clientcredits->Process");
+			clientcredits->Process();
+		}
+		{
+			DbgSection dbg("clientlist->Process");
+			clientlist->Process();
+		}
 
 		// Publish files to server if needed.
-		sharedfiles->Process();
+		{
+			// Publishing walks the shared set; on this node one of the shared
+			// roots is a NAS mount, so anything here that stats or opens a file
+			// inherits that mount's latency on the main thread.
+			DbgSection dbg("sharedfiles->Process");
+			sharedfiles->Process();
+		}
 
 		if (Kademlia::CKademlia::IsRunning()) {
 			Kademlia::CKademlia::Process();
@@ -2092,7 +2150,10 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 		if (serverconnect->IsConnecting()) {
 			serverconnect->CheckForTimeout();
 		}
-		listensocket->UpdateConnectionsStatus();
+		{
+			DbgSection dbg("listensocket->UpdateConnectionsStatus");
+			listensocket->UpdateConnectionsStatus();
+		}
 
 #ifdef ENABLE_VERSION_CHECK
 		// Periodic re-check: once per day, so a long-running amuled or
@@ -2114,22 +2175,31 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 
 	if (msCur - msPrev5 > 5000) { // every 5 seconds
 		msPrev5 = msCur;
-		listensocket->Process();
+		{
+			DbgSection dbg("listensocket->Process");
+			listensocket->Process();
+		}
 	}
 
 	if (msCur - msPrevSave >= 60000) {
 		msPrevSave = msCur;
+		DbgSection dbg("theStats::Save");
 		theStats::Save();
 	}
 
 	// Special
 	if (msCur - msPrevOS >= thePrefs::GetOSUpdate() * 1000ull) {
+		// Writes the online-signature file to the configured directory, which
+		// can itself be on a slow mount.
+		DbgSection dbg("OnlineSig");
 		OnlineSig(); // Added By Bouc7
 		msPrevOS = msCur;
 	}
 
 	if (msCur - msPrevKnownMet >= 30 * 60 * 1000 /*There must be a prefs option for this*/) {
-		// Save Shared Files data
+		// Save Shared Files data. known.met is rewritten whole, and on a busy
+		// filesystem that is a large blocking write on this thread.
+		DbgSection dbg("knownfiles->Save");
 		knownfiles->Save();
 		msPrevKnownMet = msCur;
 	}
