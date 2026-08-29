@@ -59,8 +59,9 @@
 #include <common/Format.h>
 #include "InternalEvents.h" // Needed for wxEVT_*
 #include "ThreadTasks.h"
-#include "GuiEvents.h" // Needed for EVT_MULE_NOTIFY
-#include "Timer.h"     // Needed for EVT_MULE_TIMER
+#include "GuiEvents.h"    // Needed for EVT_MULE_NOTIFY
+#include "Timer.h"        // Needed for EVT_MULE_TIMER
+#include "GetTickCount.h" // Needed for GetTickCount64 (diag timing)
 
 #include "ClientUDPSocket.h" // Do_not_auto_remove (forward declaration not enough)
 #include "ListenSocket.h"    // Do_not_auto_remove (forward declaration not enough)
@@ -75,6 +76,39 @@
 #endif
 #include <wx/ffile.h>
 #endif
+
+// debug/ec-stall-diags: see the declaration in amule.h for why this is here.
+//
+// Names the event by its numeric type plus the well-known ones spelled out,
+// because a bare number is not enough to act on and the mapping is not stable
+// across builds. Anything unnamed still gets its number, which is enough to
+// find in the event table.
+bool CamuleDaemonApp::ProcessEvent(wxEvent &event)
+{
+	const uint64 start = GetTickCount64();
+	const bool handled = CamuleApp::ProcessEvent(event);
+	const uint64 took = GetTickCount64() - start;
+	if (took >= 250) {
+		const wxEventType t = event.GetEventType();
+		const char *name = "?";
+		if (t == MULE_EVT_NOTIFY) {
+			name = "MuleNotify";
+		} else if (t == MULE_EVT_HASHING) {
+			name = "FinishedHashing";
+		} else if (t == MULE_EVT_AICH_HASHING) {
+			name = "FinishedAICHHashing";
+		} else if (t == MULE_EVT_FILE_COMPLETED) {
+			name = "FinishedCompletion";
+		} else if (t == MULE_EVT_ALLOC_FINISHED) {
+			name = "FinishedAllocation";
+		} else if (t == MULE_EVT_TIMER) {
+			name = "MuleTimer";
+		}
+		AddLogLineN(CFormat(wxT("[ecevent] %s (type=%d) took %llums")) % name % (int)t %
+			    (unsigned long long)took);
+	}
+	return handled;
+}
 
 wxBEGIN_EVENT_TABLE(CamuleDaemonApp, wxAppConsole)
 

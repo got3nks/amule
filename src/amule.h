@@ -845,6 +845,21 @@ private:
 	// This function are overridden to perform this.
 	virtual bool Initialize(int &argc_, wxChar **argv_);
 
+	// debug/ec-stall-diags: bracket every event this app dispatches.
+	//
+	// Four targeted instruments have now gone silent through a stall (the EC
+	// write path, the EC request handlers, shared-file removal, and the
+	// watcher's debounce drain), and the eleven core-timer sections were
+	// eliminated too. Guessing a fifth candidate has been wrong three times
+	// out of four, so stop guessing: every handler in this class's event table
+	// dispatches through here, so one override times all of them and names
+	// whichever runs long -- OnNotifyEvent, OnFinishedHashing,
+	// OnFinishedAICHHashing, OnFinishedCompletion, OnFinishedAllocation, the
+	// DNS callbacks, and the timers alike.
+	//
+	// Two clock reads per event; reports only past 250ms.
+	virtual bool ProcessEvent(wxEvent &event);
+
 public:
 	bool CopyTextToClipboard(wxString strText);
 
