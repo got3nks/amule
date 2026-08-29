@@ -16,6 +16,8 @@
 
 #include "SharedDirWatcher.h"
 
+#include "GetTickCount.h" // Needed for GetTickCount64 (diag timing below)
+
 #include <wx/app.h>
 #include <wx/evtloop.h>
 #include <wx/filename.h>
@@ -777,6 +779,39 @@ void CSharedDirWatcher::FlushPendingEvents()
 	// some backends) can't mutate the container while we iterate.
 	std::unordered_map<wxString, PendingPathEvents> drained;
 	drained.swap(m_pendingEvents);
+
+	// debug/ec-stall-diags: time the drain.
+	//
+	// This runs on the main thread from OnDebounceTimer -- a DIFFERENT wx
+	// timer from OnCoreTimer, which is why the [ecsection] instruments around
+	// the core loop saw nothing while [ecloop] reported a 20s stall. Every
+	// entry here costs at least one blocking stat (DirExists below), and a
+	// MODIFY costs two more inside NotifyPathModified
+	// (GetModificationTime + GetFileSize). Those are microseconds on an idle
+	// host and hundreds of milliseconds when writeback is saturated, so a
+	// large batch during a bulk file move is a plausible multi-second block on
+	// the thread every EC client is served from.
+	//
+	// Reports the batch size alongside the time: cost per event is what says
+	// whether this is "many cheap stats" or "a few very slow ones", and those
+	// point at different fixes.
+	const uint64 dbgDrainStart = GetTickCount64();
+	const size_t dbgDrainCount = drained.size();
+	struct DrainScope
+	{
+		const uint64 &start;
+		const size_t &count;
+		~DrainScope()
+		{
+			const uint64 took = GetTickCount64() - start;
+			if (took >= 250) {
+				AddLogLineN(CFormat(wxT("[ecflush] watcher drain took %llums for %zu path(s)"
+							" (%llums/path)")) %
+					    (unsigned long long)took % count %
+					    (unsigned long long)(count ? took / count : took));
+			}
+		}
+	} dbgDrainScope{ dbgDrainStart, dbgDrainCount };
 
 	for (const auto &entry : drained) {
 		const wxString &path = entry.first;
