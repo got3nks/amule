@@ -1074,7 +1074,42 @@ void CSharedFileList::RefreshPathIndex(CKnownFile *file)
 // removes first occurrence of 'toremove' in 'list'
 void CSharedFileList::RemoveFile(CKnownFile *toremove)
 {
+	// debug/ec-stall-diags: time the removal, in parts.
+	//
+	// [ecloop] proved the main loop blocks for seconds at a time; this and the
+	// other per-tick work are what it could be blocking in. Split rather than
+	// timed as a whole because the parts have very different shapes: the two
+	// map erases are O(log n), while RemoveKeywords walks the file's whole
+	// keyword list and each RemoveKeyword scans for the file -- the only part
+	// here with a plausible route to seconds.
+	//
+	// Silent below 100ms, so a healthy removal costs one clock read and
+	// nothing in the log.
+	const uint64 dbgStart = GetTickCount64();
+	uint64 dbgAfterNotify = 0;
+	uint64 dbgAfterErase = 0;
+	struct RemoveScope
+	{
+		const uint64 &start;
+		const uint64 &afterNotify;
+		const uint64 &afterErase;
+		~RemoveScope()
+		{
+			const uint64 end = GetTickCount64();
+			if (end - start >= 100) {
+				AddLogLineN(
+					CFormat(wxT("[ecremove] RemoveFile took %llums (notify %llums, erase "
+						    "%llums, keywords %llums)")) %
+					(unsigned long long)(end - start) %
+					(unsigned long long)(afterNotify - start) %
+					(unsigned long long)(afterErase - afterNotify) %
+					(unsigned long long)(end - afterErase));
+			}
+		}
+	} dbgRemoveScope{ dbgStart, dbgAfterNotify, dbgAfterErase };
+
 	Notify_SharedFilesRemoveFile(toremove);
+	dbgAfterNotify = GetTickCount64();
 	wxMutexLocker lock(list_mut);
 	if (m_Files_map.erase(toremove->GetFileHash()) > 0) {
 		m_listGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -1108,6 +1143,7 @@ void CSharedFileList::RemoveFile(CKnownFile *toremove)
 				"shares; the index may be out of step with the file's path") %
 				key);
 	}
+	dbgAfterErase = GetTickCount64();
 	/* This file keywords must not be published to kad anymore */
 	m_keywords->RemoveKeywords(toremove);
 }
@@ -1214,7 +1250,16 @@ void CSharedFileList::NotifyPathRemoved(const wxString &fullPath)
 	AddLogLineN(CFormat(_("Stopped sharing removed file: %s")) % fullPath);
 	AddDebugLogLineN(
 		logKnownFiles, CFormat("Watcher: detaching deleted file '%s' from shares") % fullPath);
+	// Timed separately from RemoveFile's own breakdown: if this is much larger
+	// than the inner figure, the cost is in the lookup or the notify above
+	// rather than in the removal itself.
+	const uint64 dbgPathStart = GetTickCount64();
 	RemoveFile(file);
+	const uint64 dbgPathTook = GetTickCount64() - dbgPathStart;
+	if (dbgPathTook >= 100) {
+		AddLogLineN(CFormat(wxT("[ecremove] NotifyPathRemoved spent %llums removing %s")) %
+			    (unsigned long long)dbgPathTook % fullPath);
+	}
 }
 
 void CSharedFileList::NotifyDirRemoved(const wxString &dirPath)
