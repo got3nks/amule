@@ -3240,7 +3240,11 @@ void CUpDownClient::SendSharedDirectories()
 	CPacket *replypacket = new CPacket(tempfile, OP_EDONKEYPROT, OP_ASKSHAREDDIRSANS);
 	theStats::AddUpOverheadOther(replypacket->GetPacketSize());
 	AddDebugLogLineN(logLocalClient, "Local Client: OP_ASKSHAREDDIRSANS to " + GetFullIP());
+	AddLogLineC(CFormat(wxT("BROWSE-DIAG: answering %s with %u directories, %u bytes")) %
+		    GetFullIP() % (unsigned)(foldersToSend.size() + 1) % replypacket->GetPacketSize());
 	SendPacket(replypacket, true, true);
+	AddLogLineC(CFormat(wxT("BROWSE-DIAG: handed OP_ASKSHAREDDIRSANS for %s to the socket")) %
+		    GetFullIP());
 }
 
 void CUpDownClient::SendSharedFilesOfDirectory(const wxString &strReqDir)

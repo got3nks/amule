@@ -883,7 +883,12 @@ bool CClientTCPSocket::ProcessPacket(const uint8_t *buffer, uint32 size, uint8 o
 				CFormat(_("User %s (%u) requested your shareddirectories-list -> Accepted")) %
 				m_client->GetUserName() % m_client->GetUserIDHybrid());
 			// send the list of shared directories
+			AddLogLineC(CFormat(wxT("BROWSE-DIAG: OP_ASKSHAREDDIRS accepted from %s, "
+						"building the answer now")) %
+				    m_client->GetFullIP());
 			m_client->SendSharedDirectories();
+			AddLogLineC(CFormat(wxT("BROWSE-DIAG: SendSharedDirectories() returned for %s")) %
+				    m_client->GetFullIP());
 		} else {
 			AddLogLineC(
 				CFormat(_("User %s (%u) requested your shareddirectories-list -> Denied")) %

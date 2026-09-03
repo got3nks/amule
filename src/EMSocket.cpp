@@ -26,6 +26,7 @@
 #include "EMSocket.h" // Interface declarations.
 
 #include <protocol/Protocols.h>
+#include <protocol/ed2k/Client2Client/TCP.h>
 #include <protocol/ed2k/Constants.h>
 
 #include "Packet.h" // Needed for CPacket
@@ -325,6 +326,45 @@ void CEMSocket::WakeIfPaused()
  *
  * @return true if the packet was added to the queue, false otherwise
  */
+namespace
+{
+
+// The browse answers only. These send paths carry every packet the client
+// sends, so anything wider than this would bury the log it is meant to explain.
+bool IsBrowseAnswer(const CPacket *packet)
+{
+	if (packet == NULL || packet->GetProtocol() != OP_EDONKEYPROT) {
+		return false;
+	}
+	switch (packet->GetOpCode()) {
+	case OP_ASKSHAREDDIRSANS:
+	case OP_ASKSHAREDFILESANSWER:
+	case OP_ASKSHAREDFILESDIRANS:
+	case OP_ASKSHAREDDENIEDANS:
+		return true;
+	default:
+		return false;
+	}
+}
+
+wxString BrowseOpName(const CPacket *packet)
+{
+	switch (packet->GetOpCode()) {
+	case OP_ASKSHAREDDIRSANS:
+		return wxT("OP_ASKSHAREDDIRSANS");
+	case OP_ASKSHAREDFILESANSWER:
+		return wxT("OP_ASKSHAREDFILESANSWER");
+	case OP_ASKSHAREDFILESDIRANS:
+		return wxT("OP_ASKSHAREDFILESDIRANS");
+	case OP_ASKSHAREDDENIEDANS:
+		return wxT("OP_ASKSHAREDDENIEDANS");
+	default:
+		return wxT("?");
+	}
+}
+
+} // namespace
+
 void CEMSocket::SendPacket(CPacket *packet, bool delpacket, bool controlpacket, uint32 actualPayloadSize)
 {
 	// printf("* SendPacket called on socket %p\n", this);
@@ -332,6 +372,11 @@ void CEMSocket::SendPacket(CPacket *packet, bool delpacket, bool controlpacket, 
 
 	if (byConnected == ES_DISCONNECTED) {
 		// printf("* Disconnected, drop packet\n");
+		if (IsBrowseAnswer(packet)) {
+			AddLogLineC(CFormat(wxT("BROWSE-DIAG: dropping %s (%u bytes): the socket was "
+						"already disconnected, so the peer is never told")) %
+				    BrowseOpName(packet) % packet->GetPacketSize());
+		}
 		if (delpacket) {
 			delete packet;
 		}
@@ -342,6 +387,15 @@ void CEMSocket::SendPacket(CPacket *packet, bool delpacket, bool controlpacket, 
 
 		if (controlpacket) {
 			// printf("* Adding a control packet\n");
+			if (IsBrowseAnswer(packet)) {
+				AddLogLineC(
+					CFormat(wxT("BROWSE-DIAG: queued %s (%u bytes); control queue now "
+						    "holds %u, standard queue %u, sendbuffer %s")) %
+					BrowseOpName(packet) % packet->GetPacketSize() %
+					(unsigned)(m_control_queue.size() + 1) %
+					(unsigned)m_standard_queue.size() %
+					(sendbuffer != NULL ? wxT("busy") : wxT("free")));
+			}
 			m_control_queue.push_back(packet);
 
 			// queue up for controlpacket
@@ -535,6 +589,12 @@ SocketSentBytes CEMSocket::Send(
 					// There's a control packet to send
 					m_currentPacket_is_controlpacket = true;
 					curPacket = m_control_queue.front();
+					if (IsBrowseAnswer(curPacket)) {
+						AddLogLineC(CFormat(wxT("BROWSE-DIAG: sending %s (%u bytes) "
+									"to the socket")) %
+							    BrowseOpName(curPacket) %
+							    curPacket->GetPacketSize());
+					}
 					m_control_queue.pop_front();
 				} else if (!m_standard_queue
 						    .empty() /*&& onlyAllowedToSendControlPacket == false*/) {
