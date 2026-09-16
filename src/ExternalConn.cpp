@@ -475,6 +475,7 @@ private:
 public:
 	size_t DbgObjTagMapSize() { return m_obj_tagmap.size(); }
 	size_t DbgObjTagMapBytes() const { return m_obj_tagmap.DbgApproxBytes(); }
+	void ForgetObject(uint32 ecid) { m_obj_tagmap.EraseValueMap(ecid); }
 
 private:
 	CECPacket *ProcessRequest2(const CECPacket *request);
@@ -942,6 +943,13 @@ size_t ExternalConn::DbgObjTagMapEntries(size_t &connections, size_t &largest, s
 		bytes += s->DbgObjTagMapBytes();
 	}
 	return total;
+}
+
+void ExternalConn::ForgetObject(uint32 ecid)
+{
+	for (CECServerSocket *s : socket_list) {
+		s->ForgetObject(ecid);
+	}
 }
 
 void ExternalConn::AddSocket(CECServerSocket *s)

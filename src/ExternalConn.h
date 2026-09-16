@@ -132,6 +132,8 @@ public:
 	void KillAllSockets();
 	// debug/mem-growth: incremental-update cache entries across EC connections.
 	size_t DbgObjTagMapEntries(size_t &connections, size_t &largest, size_t &bytes);
+	// Drop the incremental-update cache entry for an object that no longer exists.
+	void ForgetObject(uint32 ecid);
 	void ResetAllLogs();
 
 	// Brute-force protection for the password exchange, shared by every connection. It lives
