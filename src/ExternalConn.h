@@ -72,12 +72,21 @@ public:
 	}
 };
 
+// debug/mem-growth: flags a cache entry recreated for an ECID ForgetObject already erased.
+void DbgNoteNewTagmapEntry(uint32 ecid);
+
 class CObjTagMap
 {
 	std::map<uint32, CValueMap> m_obj_map;
 
 public:
-	CValueMap &GetValueMap(uint32 ECID) { return m_obj_map[ECID]; }
+	CValueMap &GetValueMap(uint32 ECID)
+	{
+		if (m_obj_map.find(ECID) == m_obj_map.end()) {
+			DbgNoteNewTagmapEntry(ECID);
+		}
+		return m_obj_map[ECID];
+	}
 
 	// Drop the per-ECID field cache. Called when an encoder for this ECID is freshly
 	// (re-)created, so the next EC_DETAIL_INC_UPDATE emits every identifying field (hash / name
@@ -134,6 +143,8 @@ public:
 	size_t DbgObjTagMapEntries(size_t &connections, size_t &largest, size_t &bytes);
 	// Drop the incremental-update cache entry for an object that no longer exists.
 	void ForgetObject(uint32 ecid);
+	// debug/mem-growth
+	static void DbgForgetStats(size_t &calls, size_t &erased, size_t &rereported);
 	void ResetAllLogs();
 
 	// Brute-force protection for the password exchange, shared by every connection. It lives

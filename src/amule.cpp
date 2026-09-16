@@ -1933,11 +1933,14 @@ void CamuleApp::DbgLogMemWatch()
 	if (ECServerHandler) {
 		ecTagmap = ECServerHandler->DbgObjTagMapEntries(ecConns, ecLargest, ecBytes);
 	}
+	size_t ecForgets = 0, ecErased = 0, ecRereported = 0;
+	ExternalConn::DbgForgetStats(ecForgets, ecErased, ecRereported);
 
 	AddLogLineN(CFormat(wxT("[memwatch] rss_kb=%lu anon_kb=%lu rss_d_kb=%ld clients=%u "
 				"credits=%zu known=%zu shared=%zu dl=%u ul_wait=%zu ul_active=%zu "
 				"servers=%zu searchres=%zu ipfilter=%u ec_conns=%zu ec_tagmap_total=%zu "
-				"ec_tagmap_largest=%zu ec_tagmap_kb=%zu %s %s")) %
+				"ec_tagmap_largest=%zu ec_tagmap_kb=%zu ec_forgets=%zu ec_erased=%zu "
+				"ec_rereported=%zu %s %s")) %
 		    rssKb % anonKb % rssDelta % (clientlist ? clientlist->GetClientCount() : 0) %
 		    (clientcredits ? clientcredits->GetCreditCount() : 0) %
 		    (knownfiles ? knownfiles->GetKnownFileCount() : 0) %
@@ -1947,7 +1950,7 @@ void CamuleApp::DbgLogMemWatch()
 		    (serverlist ? serverlist->GetServerCount() : 0) %
 		    (searchlist ? searchlist->GetCurrentSearchResultCount() : 0) %
 		    (ipfilter ? ipfilter->BanCount() : 0) % ecConns % ecTagmap % ecLargest %
-		    (ecBytes / 1024) %
+		    (ecBytes / 1024) % ecForgets % ecErased % ecRereported %
 		    (clientlist ? clientlist->DbgIndexSummary() : wxString(wxT("cl=none"))) % kad);
 }
 

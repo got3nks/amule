@@ -38,7 +38,9 @@
 #include <common/MD5Sum.h>
 #include "libs/ec/cpp/ECCrypt.h"
 
-#include "ECIdDiff.h"            // Needed for ComputeRemovedIds
+#include "ECIdDiff.h" // Needed for ComputeRemovedIds
+#include <unordered_set>
+
 #include "ExternalConn.h"        // Interface declarations
 #include "ECFullResponseCache.h" // Needed for s_ec*FullCache
 #include "updownclient.h"        // Needed for CUpDownClient
@@ -475,7 +477,12 @@ private:
 public:
 	size_t DbgObjTagMapSize() { return m_obj_tagmap.size(); }
 	size_t DbgObjTagMapBytes() const { return m_obj_tagmap.DbgApproxBytes(); }
-	void ForgetObject(uint32 ecid) { m_obj_tagmap.EraseValueMap(ecid); }
+	size_t ForgetObject(uint32 ecid)
+	{
+		const size_t before = m_obj_tagmap.size();
+		m_obj_tagmap.EraseValueMap(ecid);
+		return before - m_obj_tagmap.size();
+	}
 
 private:
 	CECPacket *ProcessRequest2(const CECPacket *request);
@@ -945,10 +952,41 @@ size_t ExternalConn::DbgObjTagMapEntries(size_t &connections, size_t &largest, s
 	return total;
 }
 
+namespace
+{
+// Every ECID the fix erased, to catch one being reported again. Grows ~40 bytes per removal,
+// well under the entries it replaces.
+std::unordered_set<uint32> g_dbgErasedEcids;
+size_t g_dbgForgetCalls = 0;
+size_t g_dbgErasedEntries = 0;
+size_t g_dbgRereported = 0;
+} // namespace
+
+void DbgNoteNewTagmapEntry(uint32 ecid)
+{
+	if (g_dbgErasedEcids.count(ecid) == 0) {
+		return;
+	}
+	++g_dbgRereported;
+	if (g_dbgRereported <= 20) {
+		AddLogLineN(
+			CFormat(wxT("[ecerase] ecid %u reported again after its entry was erased")) % ecid);
+	}
+}
+
+void ExternalConn::DbgForgetStats(size_t &calls, size_t &erased, size_t &rereported)
+{
+	calls = g_dbgForgetCalls;
+	erased = g_dbgErasedEntries;
+	rereported = g_dbgRereported;
+}
+
 void ExternalConn::ForgetObject(uint32 ecid)
 {
+	++g_dbgForgetCalls;
+	g_dbgErasedEcids.insert(ecid);
 	for (CECServerSocket *s : socket_list) {
-		s->ForgetObject(ecid);
+		g_dbgErasedEntries += s->ForgetObject(ecid);
 	}
 }
 
