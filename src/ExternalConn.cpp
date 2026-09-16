@@ -474,6 +474,7 @@ private:
 
 public:
 	size_t DbgObjTagMapSize() { return m_obj_tagmap.size(); }
+	size_t DbgObjTagMapBytes() const { return m_obj_tagmap.DbgApproxBytes(); }
 
 private:
 	CECPacket *ProcessRequest2(const CECPacket *request);
@@ -928,15 +929,17 @@ ExternalConn::~ExternalConn()
 	delete m_ec_notifier;
 }
 
-size_t ExternalConn::DbgObjTagMapEntries(size_t &connections, size_t &largest)
+size_t ExternalConn::DbgObjTagMapEntries(size_t &connections, size_t &largest, size_t &bytes)
 {
 	size_t total = 0;
 	connections = socket_list.size();
 	largest = 0;
+	bytes = 0;
 	for (CECServerSocket *s : socket_list) {
 		const size_t n = s->DbgObjTagMapSize();
 		total += n;
 		largest = std::max(largest, n);
+		bytes += s->DbgObjTagMapBytes();
 	}
 	return total;
 }

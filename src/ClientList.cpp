@@ -386,6 +386,15 @@ uint32 CClientList::GetClientCount() const
 	return m_clientList.size();
 }
 
+wxString CClientList::DbgIndexSummary() const
+{
+	return CFormat(wxT("cl_hash=%zu cl_ip=%zu cl_tracked=%zu cl_banned=%zu cl_dead=%u cl_kadsrc=%zu "
+			   "cl_fwcheck=%zu cl_cb=%zu cl_cbreq=%zu")) %
+	       m_hashList.size() % m_ipList.size() % m_trackedClientsList.size() % m_bannedList.Size() %
+	       m_deadSources.GetDeadSourcesCount() % m_KadSources.size() % m_firewallCheckRequests.size() %
+	       m_currentDirectCallbacks.size() % m_directCallbackRequests.size();
+}
+
 void CClientList::DeleteAll()
 {
 	m_ipList.clear();

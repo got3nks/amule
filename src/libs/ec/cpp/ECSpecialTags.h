@@ -86,8 +86,31 @@ class CValueMap
 		map.insert(it, std::pair<const ec_tagname_t, T>(tagname, value));
 	}
 
+	// Approximate: rb-tree node header plus value per element, and string / tag payload.
+	template <class T> static size_t DbgMapBytes(const std::map<ec_tagname_t, T> &map)
+	{
+		return map.size() * (sizeof(typename std::map<ec_tagname_t, T>::value_type) + 32);
+	}
+
 public:
 	CValueMap() {}
+
+	// debug/mem-growth
+	size_t DbgApproxBytes() const
+	{
+		size_t bytes = sizeof(*this) + DbgMapBytes(m_map_uint8) + DbgMapBytes(m_map_uint16) +
+			       DbgMapBytes(m_map_uint32) + DbgMapBytes(m_map_uint64) +
+			       DbgMapBytes(m_map_md4) + DbgMapBytes(m_map_uint128) +
+			       DbgMapBytes(m_map_string) + DbgMapBytes(m_map_double) +
+			       DbgMapBytes(m_map_bool) + DbgMapBytes(m_map_tag);
+		for (const auto &kv : m_map_string) {
+			bytes += kv.second.length() * sizeof(wxStringCharType);
+		}
+		for (const auto &kv : m_map_tag) {
+			bytes += kv.second.GetTagLen();
+		}
+		return bytes;
+	}
 
 	CValueMap(const CValueMap &valuemap)
 	{

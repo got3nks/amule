@@ -85,6 +85,16 @@ public:
 	void EraseValueMap(uint32 ECID) { m_obj_map.erase(ECID); }
 
 	size_t size() { return m_obj_map.size(); }
+
+	// debug/mem-growth
+	size_t DbgApproxBytes() const
+	{
+		size_t bytes = 0;
+		for (const auto &kv : m_obj_map) {
+			bytes += kv.second.DbgApproxBytes() + 32;
+		}
+		return bytes;
+	}
 };
 
 class CECServerSocket;
@@ -121,7 +131,7 @@ public:
 	void RemoveSocket(CECServerSocket *s);
 	void KillAllSockets();
 	// debug/mem-growth: incremental-update cache entries across EC connections.
-	size_t DbgObjTagMapEntries(size_t &connections, size_t &largest);
+	size_t DbgObjTagMapEntries(size_t &connections, size_t &largest, size_t &bytes);
 	void ResetAllLogs();
 
 	// Brute-force protection for the password exchange, shared by every connection. It lives

@@ -1929,15 +1929,15 @@ void CamuleApp::DbgLogMemWatch()
 	// Per-connection incremental-update caches. Entries are dropped for recreated file encoders
 	// and removed search results only, so a peer that has left keeps its entry for as long as
 	// the connection lives. That growth follows peer churn, which no count above measures.
-	size_t ecConns = 0, ecLargest = 0, ecTagmap = 0;
+	size_t ecConns = 0, ecLargest = 0, ecTagmap = 0, ecBytes = 0;
 	if (ECServerHandler) {
-		ecTagmap = ECServerHandler->DbgObjTagMapEntries(ecConns, ecLargest);
+		ecTagmap = ECServerHandler->DbgObjTagMapEntries(ecConns, ecLargest, ecBytes);
 	}
 
 	AddLogLineN(CFormat(wxT("[memwatch] rss_kb=%lu anon_kb=%lu rss_d_kb=%ld clients=%u "
 				"credits=%zu known=%zu shared=%zu dl=%u ul_wait=%zu ul_active=%zu "
-				"servers=%zu searchres=%zu ipfilter=%u ec_conns=%zu ec_tagmap=%zu "
-				"ec_tagmap_max=%zu %s")) %
+				"servers=%zu searchres=%zu ipfilter=%u ec_conns=%zu ec_tagmap_total=%zu "
+				"ec_tagmap_largest=%zu ec_tagmap_kb=%zu %s %s")) %
 		    rssKb % anonKb % rssDelta % (clientlist ? clientlist->GetClientCount() : 0) %
 		    (clientcredits ? clientcredits->GetCreditCount() : 0) %
 		    (knownfiles ? knownfiles->GetKnownFileCount() : 0) %
@@ -1946,7 +1946,9 @@ void CamuleApp::DbgLogMemWatch()
 		    (uploadqueue ? uploadqueue->GetWaitingList().size() : 0) % ulActive %
 		    (serverlist ? serverlist->GetServerCount() : 0) %
 		    (searchlist ? searchlist->GetCurrentSearchResultCount() : 0) %
-		    (ipfilter ? ipfilter->BanCount() : 0) % ecConns % ecTagmap % ecLargest % kad);
+		    (ipfilter ? ipfilter->BanCount() : 0) % ecConns % ecTagmap % ecLargest %
+		    (ecBytes / 1024) %
+		    (clientlist ? clientlist->DbgIndexSummary() : wxString(wxT("cl=none"))) % kad);
 }
 
 void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))

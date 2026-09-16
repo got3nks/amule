@@ -119,6 +119,9 @@ public:
 	 */
 	uint32 GetClientCount() const;
 
+	// debug/mem-growth: every index and side list, to compare against GetClientCount().
+	wxString DbgIndexSummary() const;
+
 	/**
 	 * Deletes all tracked clients.
 	 */
