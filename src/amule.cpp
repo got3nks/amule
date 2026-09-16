@@ -1921,7 +1921,7 @@ void CamuleApp::DbgLogMemWatch()
 		// can grow without limit.
 		kad = CFormat(wxT("kad_contacts=%u kad_keys=%zu kad_src=%u kad_kw=%u kad_notes=%u "
 				  "kad_load=%u")) %
-		      (rz ? rz->EstimateCount() : 0) % (idx ? idx->GetFileKeyCount() : 0) %
+		      (rz ? rz->GetNumContacts() : 0) % (idx ? idx->GetFileKeyCount() : 0) %
 		      (idx ? idx->m_totalIndexSource : 0) % (idx ? idx->m_totalIndexKeyword : 0) %
 		      (idx ? idx->m_totalIndexNotes : 0) % (idx ? idx->m_totalIndexLoad : 0);
 	}
