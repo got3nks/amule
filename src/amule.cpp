@@ -66,6 +66,8 @@
 #include <common/DataFileVersion.h> // Needed for MET_HEADER (server.met probe)
 #include "CFile.h"                  // Needed for CFile (server.met probe)
 #include "kademlia/kademlia/Kademlia.h"
+#include "kademlia/kademlia/Indexed.h"    // Needed for CIndexed in DbgLogMemWatch
+#include "kademlia/routing/RoutingZone.h" // Needed for CRoutingZone in DbgLogMemWatch
 #include "kademlia/kademlia/Prefs.h"
 #include "kademlia/kademlia/UDPFirewallTester.h"
 #include "CanceledFileList.h"
@@ -1866,6 +1868,78 @@ void CamuleApp::OnTCPTimer(CTimerEvent &WXUNUSED(evt))
 	serverconnect->ConnectToAnyServer();
 }
 
+// debug/mem-growth: what the daemon is holding, next to how much memory it is using.
+//
+// Counts, not bytes. These containers hold pointers to variable-sized objects -- a Kad keyword
+// entry carries tag lists and filenames, a client its buffers -- so count * sizeof(element) would
+// report the map node and miss the payload, and be most wrong for the containers most likely to be
+// responsible. What identifies the grower is which count moves with RSS; the per-entry cost is
+// then worth measuring once, for that one container.
+//
+// Every accessor here is O(1) on an existing member, so the whole sample is a handful of loads.
+void CamuleApp::DbgLogMemWatch()
+{
+	static uint64 s_lastAt = 0;
+	static unsigned long s_lastRss = 0;
+
+	const uint64 now = GetTickCount64();
+	// Five minutes: slow growth is the thing being measured, and a sample costs a log line.
+	if (s_lastAt != 0 && now - s_lastAt < 300000) {
+		return;
+	}
+	s_lastAt = now;
+
+	// Self-correlating: reading our own RSS here means the counts and the memory they are being
+	// compared against come from the same instant. Absent off Linux, reported as 0.
+	unsigned long rssKb = 0, anonKb = 0;
+	if (FILE *st = fopen("/proc/self/status", "r")) {
+		char line[256];
+		while (fgets(line, sizeof(line), st)) {
+			if (sscanf(line, "VmRSS: %lu kB", &rssKb) == 1) {
+				continue;
+			}
+			sscanf(line, "RssAnon: %lu kB", &anonKb);
+		}
+		fclose(st);
+	}
+	const long rssDelta = (s_lastRss == 0) ? 0 : (long)rssKb - (long)s_lastRss;
+	s_lastRss = rssKb;
+
+	// m_uploadinglist is shared with the disk I/O thread; size() takes its lock like any reader.
+	size_t ulActive = 0;
+	if (uploadqueue) {
+		wxMutexLocker lock(uploadqueue->GetUploadingListLock());
+		ulActive = uploadqueue->GetUploadingList().size();
+	}
+
+	wxString kad = wxT("kad=off");
+	if (Kademlia::CKademlia::IsRunning()) {
+		Kademlia::CIndexed *idx = Kademlia::CKademlia::GetIndexed();
+		Kademlia::CRoutingZone *rz = Kademlia::CKademlia::GetRoutingZone();
+		// The index holds what other peers published to us, so it is bounded by the network
+		// rather than by our own share -- the one collection here that a well-connected node
+		// can grow without limit.
+		kad = CFormat(wxT("kad_contacts=%u kad_keys=%zu kad_src=%u kad_kw=%u kad_notes=%u "
+				  "kad_load=%u")) %
+		      (rz ? rz->EstimateCount() : 0) % (idx ? idx->GetFileKeyCount() : 0) %
+		      (idx ? idx->m_totalIndexSource : 0) % (idx ? idx->m_totalIndexKeyword : 0) %
+		      (idx ? idx->m_totalIndexNotes : 0) % (idx ? idx->m_totalIndexLoad : 0);
+	}
+
+	AddLogLineN(CFormat(wxT("[memwatch] rss_kb=%lu anon_kb=%lu rss_d_kb=%ld clients=%u "
+				"credits=%zu known=%zu shared=%zu dl=%u ul_wait=%zu ul_active=%zu "
+				"servers=%zu searchres=%zu ipfilter=%u %s")) %
+		    rssKb % anonKb % rssDelta % (clientlist ? clientlist->GetClientCount() : 0) %
+		    (clientcredits ? clientcredits->GetCreditCount() : 0) %
+		    (knownfiles ? knownfiles->GetKnownFileCount() : 0) %
+		    (sharedfiles ? sharedfiles->GetCount() : 0) %
+		    (downloadqueue ? downloadqueue->GetFileCount() : 0) %
+		    (uploadqueue ? uploadqueue->GetWaitingList().size() : 0) % ulActive %
+		    (serverlist ? serverlist->GetServerCount() : 0) %
+		    (searchlist ? searchlist->GetCurrentSearchResultCount() : 0) %
+		    (ipfilter ? ipfilter->BanCount() : 0) % kad);
+}
+
 void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 {
 	// Former TimerProc section
@@ -1876,6 +1950,8 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 	if (!IsRunning()) {
 		return;
 	}
+
+	DbgLogMemWatch();
 
 	// Check if we should terminate the app. OnShutdownSignal only sets the flag; the actual
 	// exit trigger runs from here (normal context) every CORE_TIMER_PERIOD ms.

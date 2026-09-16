@@ -504,6 +504,8 @@ protected:
 
 	void OnTCPTimer(CTimerEvent &evt);
 	void OnCoreTimer(CTimerEvent &evt);
+	// debug/mem-growth: periodic container-size sample, see the definition.
+	void DbgLogMemWatch();
 
 	void OnFinishedHashing(CHashingEvent &evt);
 	void OnPartFileHashResult(CPartFileHashResultEvent &evt);
