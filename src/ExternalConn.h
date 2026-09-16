@@ -120,6 +120,8 @@ public:
 	void AddSocket(CECServerSocket *s);
 	void RemoveSocket(CECServerSocket *s);
 	void KillAllSockets();
+	// debug/mem-growth: incremental-update cache entries across EC connections.
+	size_t DbgObjTagMapEntries(size_t &connections, size_t &largest);
 	void ResetAllLogs();
 
 	// Brute-force protection for the password exchange, shared by every connection. It lives

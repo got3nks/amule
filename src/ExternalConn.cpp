@@ -471,6 +471,11 @@ private:
 	CLoggerAccess m_LoggerAccess;
 	CFileEncoderMap m_FileEncoder;
 	CObjTagMap m_obj_tagmap;
+
+public:
+	size_t DbgObjTagMapSize() { return m_obj_tagmap.size(); }
+
+private:
 	CECPacket *ProcessRequest2(const CECPacket *request);
 
 	virtual bool IsAuthorized() { return m_conn_state == CONN_ESTABLISHED; }
@@ -921,6 +926,19 @@ ExternalConn::~ExternalConn()
 	KillAllSockets();
 	delete m_ECServer;
 	delete m_ec_notifier;
+}
+
+size_t ExternalConn::DbgObjTagMapEntries(size_t &connections, size_t &largest)
+{
+	size_t total = 0;
+	connections = socket_list.size();
+	largest = 0;
+	for (CECServerSocket *s : socket_list) {
+		const size_t n = s->DbgObjTagMapSize();
+		total += n;
+		largest = std::max(largest, n);
+	}
+	return total;
 }
 
 void ExternalConn::AddSocket(CECServerSocket *s)
