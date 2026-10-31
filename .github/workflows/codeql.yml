@@ -32,6 +32,7 @@ on:
   # Note: without a pull_request trigger, GitHub will not post a "Code scanning"
   # status check on open PRs. If branch protection rules require that check,
   # re-add the pull_request trigger.
+  workflow_dispatch:
   schedule:
     - cron: "30 21 * * 4"
 
