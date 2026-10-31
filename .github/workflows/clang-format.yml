@@ -30,7 +30,7 @@ permissions:
 jobs:
   clang-format:
     name: Check clang-format
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Check src/
