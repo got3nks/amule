@@ -4009,3 +4009,4 @@ const ECSRP::Verifier &CamuleApp::GetEcTokenVerifier(uint8_t credential)
 		verifier = m_ecDummyTokenVerifier;
 	return verifier;
 }
+// gate test
