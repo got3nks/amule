@@ -202,3 +202,4 @@ This rewrites `docs/man/po/manpages.pot` and merges it into every
 * Detailed build and usage information: <https://amule-org.github.io/docs>
 * Forum for questions, bug reports, etc: <https://github.com/amule-org/amule/discussions>
 * Upstream issue tracker: <https://github.com/amule-org/amule/issues>
+
