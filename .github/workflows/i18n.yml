@@ -33,7 +33,7 @@ permissions:
 jobs:
   pofiles:
     name: Translation checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
 
     steps:
       - uses: actions/checkout@v7
@@ -55,7 +55,7 @@ jobs:
 
   pot-sync:
     name: App catalogs in sync with source
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
 
     steps:
       - uses: actions/checkout@v7
@@ -97,7 +97,7 @@ jobs:
 
   manpages-pot-sync:
     name: Manpage catalogs in sync with English masters
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
 
     steps:
       - uses: actions/checkout@v7
@@ -123,7 +123,7 @@ jobs:
 
   webapi-dictionaries:
     name: amuleapi Web UI dictionaries
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
 
     steps:
       - uses: actions/checkout@v7

@@ -46,7 +46,7 @@ permissions:
 jobs:
   icon-data-sync:
     name: Icon data in sync with source
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
 
     steps:
       - uses: actions/checkout@v7
@@ -80,7 +80,7 @@ jobs:
 
   browser-country-flags:
     name: WebUI country flags at 1x, 2x and 3x
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-slim
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
