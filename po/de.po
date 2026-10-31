@@ -10997,5 +10997,3 @@ msgstr ""
 #, c-format
 #~ msgid "No GeoLite2 update URL configured. Download GeoLite2-Country.mmdb manually (a free MaxMind account is required) and place it at %s, or set the URL in Preferences."
 #~ msgstr "Keine GeoLite2-Update-URL konfiguriert. Laden Sie GeoLite2-Country.mmdb manuell herunter (ein kostenloses MaxMind-Konto ist erforderlich) und legen Sie sie unter %s ab, oder setzen Sie die URL in den Einstellungen."
-
-msgid "broken
