@@ -179,11 +179,15 @@ struct Amf
 		case 5:
 		case 6:
 			break; // Null, undefined.
-		case 10: {     // Strict array.
+		case 10: { // Strict array. Numbers, such as a keyframe index, are skipped without counting.
 			const uint32_t n = r.be32(p);
 			p += 4;
-			for (uint32_t i = 0; i < n; ++i)
-				value(p, std::string(), depth + 1);
+			for (uint32_t i = 0; i < n; ++i) {
+				if (p < end && r.u8(p) == 0)
+					p += 9;
+				else
+					value(p, std::string(), depth + 1);
+			}
 			break;
 		}
 		case 11:
@@ -518,11 +522,13 @@ void parseMpegPs(Reader &r, Result &res)
 	};
 	scan(0, std::min<int64_t>(r.size(), 1024 * 1024), true);
 	// MPEG-1 or MPEG-2 video: the sequence extension start code (00 00 01 B5) only exists in MPEG-2.
+	// Without a sequence header (00 00 01 B3) it is another codec, such as H.264.
 	if (video) {
 		const std::string head =
 			r.bytes(0, static_cast<size_t>(std::min<int64_t>(r.size(), 1024 * 1024)));
+		const bool mpeg = head.find(std::string("\0\0\1\xB3", 4)) != std::string::npos;
 		const bool mpeg2 = head.find(std::string("\0\0\1\xB5", 4)) != std::string::npos;
-		res.codec = mpeg2 ? "mpeg2video" : "mpeg1video";
+		res.codec = !mpeg ? "" : mpeg2 ? "mpeg2video" : "mpeg1video";
 	} else {
 		res.codec = audio;
 	}

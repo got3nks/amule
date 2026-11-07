@@ -170,6 +170,16 @@ class RealWorldQuirkTests(unittest.TestCase):
                 # A wider gap would leave the count short, so there is no duration.
                 self.assertEqual(self.probe(half + b'\0' * 100000 + half), (0, codec))
 
+    def test_mpeg1_layer1_frame_length(self):
+        # 128 kbps at 44.1 kHz: 34 slots of 4 bytes, and a padding slot in some frames.
+        data, slots = b'', 0
+        for _ in range(1000):
+            slots += 12 * 128000 % 44100
+            pad = slots >= 44100
+            slots -= 44100 * pad
+            data += struct.pack('>I', 0xFFFF40C0 | pad << 9) + b'\0' * (132 + 4 * pad)
+        self.assertEqual(self.probe(data), (9, 'mp1'))
+
     def test_amr_with_a_reserved_frame_type(self):
         frames = b'\x3c' + b'\0' * 31  # 12.2 kbit/s, 20 ms.
         self.assertEqual(self.probe(b'#!AMR\n' + frames * 500), (10, 'amr_nb'))

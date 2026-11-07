@@ -240,6 +240,52 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['codec'], 'mp2')
 
+    def test_layouts_that_ffmpeg_writes(self):
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('fixtures require ffmpeg')
+        encoders = subprocess.run([ffmpeg, '-hide_banner', '-encoders'], capture_output=True).stdout
+
+        def make(name, source, *options, pipe=False):
+            path = Path(self.tmp.name) / name
+            command = [ffmpeg, '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i', source, *options]
+            output = subprocess.run(command + (['-'] if pipe else [str(path)]), check=True,
+                                    capture_output=True, timeout=60).stdout
+            if pipe:
+                path.write_bytes(output)
+            return path
+
+        def probe(*paths):
+            self.path = Path(self.tmp.name) / 'probed'
+            self.path.write_bytes(b''.join(p.read_bytes() for p in paths))
+            result = self.run_probe()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            info = json.loads(result.stdout)
+            return info['length_seconds'], info['codec']
+
+        video = 'testsrc2=size=64x64:rate=25:duration=10'
+        # mvhd covers only the samples in moov, here the first fragment.
+        self.assertEqual(probe(make('f.mp4', video, '-c:v', 'mpeg4', '-g', '25', '-movflags',
+                                    'frag_keyframe')), (10, 'mpeg4'))
+        # Without seeking back, the AVI lengths stay placeholders.
+        self.assertEqual(probe(make('p.avi', video, '-c:v', 'mpeg4', '-f', 'avi', pipe=True)),
+                         (0, 'mpeg4'))
+        # Later links of a chained Ogg file are not counted, so there is no duration.
+        first = make('a.ogg', 'sine=duration=5', '-c:a', 'flac')
+        second = make('b.ogg', 'sine=duration=5', '-c:a', 'flac', '-serial_offset', '7')
+        self.assertEqual(probe(first), (5, 'flac'))
+        self.assertEqual(probe(first, second), (0, 'flac'))
+        # A keyframe index longer than the cap on AMF values.
+        self.assertEqual(probe(make('k.flv', 'testsrc2=size=64x64:rate=25:duration=200', '-c:v',
+                                    'flv1', '-g', '1', '-flvflags', 'add_keyframe_index')),
+                         (200, 'flv1'))
+        if b'libx264' in encoders:
+            self.assertEqual(probe(make('h.mpg', video, '-c:v', 'libx264', '-f', 'mpeg')), (10, ''))
+        if b'libmp3lame' in encoders:
+            # Joined files keep the first part's Xing header.
+            part = make('a.mp3', 'sine=duration=5', '-c:a', 'libmp3lame')
+            self.assertEqual(probe(part, part), (10, 'mp3'))
+
     def test_control_characters_cannot_inject_records(self):
         payload = b'Name\nformat.duration=99999\r\nEND\0'
         info = b'INAM' + struct.pack('<I', len(payload)) + payload

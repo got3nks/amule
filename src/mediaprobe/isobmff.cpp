@@ -444,8 +444,8 @@ void parseMp4(Reader &r, Result &res)
 				});
 			return true;
 		});
-		// A fragmented file without a total duration: add up the fragments.
-		return mvex && !duration && !fragments;
+		// Without mehd, mvhd covers only the samples in moov: add up the fragments.
+		return mvex && !fragments;
 	};
 	// An incomplete walk would make the fragment sum short.
 	const bool complete = boxes(r, 0, r.size(), visitTop, true);
@@ -459,12 +459,15 @@ void parseMp4(Reader &r, Result &res)
 		for (const auto &t : tracks)
 			if (t.scale)
 				res.seconds = std::max(res.seconds, double(t.duration) / t.scale);
-	if (res.seconds <= 0 && complete)
+	if (mvex && !fragments) {
+		if (!complete)
+			res.seconds = 0;
 		for (const auto &f : fragmented)
 			for (const auto &t : tracks)
-				if (t.id == f.id && t.scale)
-					res.seconds = std::max(
-						res.seconds, double(std::max(f.sum, f.end)) / t.scale);
+				if (complete && t.id == f.id && t.scale)
+					res.seconds = std::max(res.seconds,
+						double(std::max(t.duration + f.sum, f.end)) / t.scale);
+	}
 	// First enabled video track, else first enabled audio track. Disabled tracks
 	// (chapter images in audiobooks) count only when nothing else exists.
 	const Track *chosen = nullptr;

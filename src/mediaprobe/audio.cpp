@@ -46,7 +46,9 @@ bool mpegFrame(uint32_t h, MpegFrame &f)
 	f.rate = rates[si] >> (f.version == 1 ? 0 : f.version == 2 ? 1 : 2);
 	f.samples = f.layer == 1 ? 384 : (f.layer == 3 && f.version != 1) ? 576 : 1152;
 	const unsigned padding = (h >> 9) & 1;
-	f.length = f.samples / 8 * f.bitrate * 1000 / f.rate + (f.layer == 1 ? padding * 4 : padding);
+	// Layer I frames are counted in 4-byte slots.
+	f.length = f.layer == 1 ? (12 * f.bitrate * 1000 / f.rate + padding) * 4
+				: f.samples / 8 * f.bitrate * 1000 / f.rate + padding;
 	f.mono = ((h >> 6) & 3) == 3;
 	return f.length >= 4;
 }
@@ -116,15 +118,20 @@ void parseMpegAudio(Reader &r, int64_t start, Result &res)
 	if (first < 0)
 		throw Malformed{};
 	res.codec = f.layer == 3 ? "mp3" : f.layer == 2 ? "mp2" : "mp1";
-	// Xing/Info and VBRI headers carry the frame count of VBR files.
+	// Xing/Info and VBRI headers carry the frame count of VBR files, and the bytes it covers.
 	const int64_t xing = first + 4 + (f.version == 1 ? (f.mono ? 17 : 32) : (f.mono ? 9 : 17));
-	uint32_t frames = 0;
+	uint32_t frames = 0, bytes = 0;
 	if ((r.match(xing, "Xing", 4) || r.match(xing, "Info", 4)) && r.has(xing, 12) &&
-		(r.be32(xing + 4) & 1))
+		(r.be32(xing + 4) & 1)) {
 		frames = r.be32(xing + 8);
-	else if (r.match(first + 36, "VBRI", 4) && r.has(first + 36, 18))
+		if ((r.be32(xing + 4) & 2) && r.has(xing + 12, 4))
+			bytes = r.be32(xing + 12);
+	} else if (r.match(first + 36, "VBRI", 4) && r.has(first + 36, 18)) {
+		bytes = r.be32(first + 36 + 10);
 		frames = r.be32(first + 36 + 14);
-	if (frames) {
+	}
+	// Joined files keep the first part's header, so a much larger stream is counted, as in FFmpeg.
+	if (frames && !(bytes && end - first > int64_t(bytes) + bytes / 16)) {
 		res.seconds = double(frames) * f.samples / f.rate;
 		return;
 	}

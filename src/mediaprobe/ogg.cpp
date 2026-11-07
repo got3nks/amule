@@ -214,8 +214,11 @@ void parseOgg(Reader &r, Result &res)
 			if (tail.compare(i, 4, "OggS"))
 				continue;
 			Page g;
-			if (page(r, from + static_cast<int64_t>(i), g) && g.serial == serial &&
-				g.granule != ~0ULL) {
+			if (!page(r, from + static_cast<int64_t>(i), g))
+				continue;
+			if (!streams.count(g.serial))
+				return; // A chained file: the first link's granule would be short.
+			if (g.serial == serial && g.granule != ~0ULL) {
 				res.seconds = seconds(*chosen, g.granule);
 				return;
 			}

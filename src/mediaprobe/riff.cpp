@@ -155,6 +155,10 @@ void aviResult(const Avi &avi, Result &res)
 		if (audio->rate && audio->scale)
 			res.seconds = double(audio->length) * audio->scale / audio->rate;
 	}
+	// FFmpeg writing to a pipe leaves no frame count in avih and a placeholder length in strh.
+	const AviStream *timed = video ? video : audio;
+	if (timed && !avi.totalFrames && timed->length == 0x40000000)
+		res.seconds = 0;
 }
 } // namespace
 
