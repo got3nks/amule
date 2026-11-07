@@ -146,6 +146,8 @@ int main(int argc, char **argv)
 	// Whole seconds, rounded; the overall bitrate from the exact duration, truncated.
 	const uint32_t length = clamp32(std::floor(r.seconds + 0.5));
 	const uint32_t bitrate = r.seconds > 0 ? clamp32(double(size) * 8 / r.seconds / 1000) : 0;
+	if (!length && r.codec.empty())
+		return 10; // The core rejects that reply, so give the verdict it can store.
 	if (json) {
 		std::cout << "{\"length_seconds\":" << length << ",\"bitrate_kbps\":" << bitrate;
 		for (const auto &item : { std::make_pair("codec", r.codec),

@@ -18,6 +18,54 @@ MAGICS = (b'RIFF\xff\xff\xff\x7fWAVE', b'RIFF\xff\xff\xff\x7fAVI ', b'FORM\xff\x
           b'\xff\xf1\x50\x80', b'\x00\x00\x00\x01\x67', b'.RMF\x00\x00\x00\x12\x00\x00')
 
 
+def box(kind, *payload):
+    body = b''.join(payload)
+    return struct.pack('>I', 8 + len(body)) + kind + body
+
+
+def full(kind, version_flags, *payload):
+    return box(kind, struct.pack('>I', version_flags), *payload)
+
+
+def chunk(cid, payload):
+    return cid + struct.pack('<I', len(payload)) + payload + b'\0' * (len(payload) & 1)
+
+
+def pts_bytes(pts):
+    return bytes((0x21 | (pts >> 29 & 0x0e), pts >> 22 & 0xff, (pts >> 14 & 0xfe) | 1,
+                  pts >> 7 & 0xff, (pts << 1 & 0xfe) | 1))
+
+
+def ts_packet(pid, payload, prefix=b''):
+    body = payload + b'\xff' * (184 - len(payload))
+    return prefix + bytes((0x47, 0x40 | pid >> 8, pid & 0xff, 0x10)) + body
+
+
+def pes(stream, pts, payload=b''):
+    return b'\0\0\1' + bytes((stream,)) + struct.pack('>H', 8 + len(payload)) + b'\x80\x80\x05' + \
+        pts_bytes(pts) + payload
+
+
+def mp4(mvhd_duration, mdhd_duration, extra_mvex=b''):
+    stsd = full(b'stsd', 0, struct.pack('>I', 1), box(b'avc1', b'\0' * 78))
+    mdia = box(b'mdia', full(b'mdhd', 0, struct.pack('>5I', 0, 0, 1000, mdhd_duration, 0)),
+               full(b'hdlr', 0, b'\0' * 4 + b'vide' + b'\0' * 13),
+               box(b'minf', box(b'stbl', stsd)))
+    trak = box(b'trak', full(b'tkhd', 1, struct.pack('>5I', 0, 0, 1, 0, 0) + b'\0' * 64), mdia)
+    mvex = box(b'mvex', extra_mvex, full(b'trex', 0, struct.pack('>5I', 1, 1, 0, 0, 0)))
+    if mvhd_duration is None:  # Version 1 with an all-ones duration: unknown (Smooth Streaming).
+        mvhd = full(b'mvhd', 1 << 24, struct.pack('>QQIQ', 0, 0, 1000, (1 << 64) - 1) + b'\0' * 80)
+    else:
+        mvhd = full(b'mvhd', 0, struct.pack('>4I', 0, 0, 1000, mvhd_duration) + b'\0' * 80)
+    return box(b'ftyp', b'isom\0\0\0\0') + box(b'moov', mvhd, trak, mvex)
+
+
+def moof(duration, count, decode_time=None):
+    tfdt = b'' if decode_time is None else full(b'tfdt', 0, struct.pack('>I', decode_time))
+    return box(b'moof', box(b'traf', full(b'tfhd', 8, struct.pack('>II', 1, duration)), tfdt,
+                            full(b'trun', 0, struct.pack('>I', count)))) + box(b'mdat')
+
+
 class HostileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -125,20 +173,7 @@ class RealWorldQuirkTests(unittest.TestCase):
         self.assertEqual(self.probe(ebml + segment), (2, 'mpeg4'))
 
     def test_fragmented_mp4_without_total_duration(self):
-        def box(kind, *payload):
-            body = b''.join(payload)
-            return struct.pack('>I', 8 + len(body)) + kind + body
-        def full(kind, version_flags, *payload):
-            return box(kind, struct.pack('>I', version_flags), *payload)
-        stsd = full(b'stsd', 0, struct.pack('>I', 1), box(b'avc1', b'\0' * 78))
-        mdia = box(b'mdia', full(b'mdhd', 0, struct.pack('>5I', 0, 0, 1000, 0, 0)),
-                   full(b'hdlr', 0, b'\0' * 4 + b'vide' + b'\0' * 13),
-                   box(b'minf', box(b'stbl', stsd)))
-        trak = box(b'trak', full(b'tkhd', 1, struct.pack('>5I', 0, 0, 1, 0, 0) + b'\0' * 64), mdia)
-        mvex = box(b'mvex', full(b'trex', 0, struct.pack('>5I', 1, 1, 0, 0, 0)))
-        # Version 1 mvhd with an all-ones duration, which means unknown (Smooth Streaming).
-        mvhd = full(b'mvhd', 1 << 24, struct.pack('>QQIQ', 0, 0, 1000, (1 << 64) - 1) + b'\0' * 80)
-        moov = box(b'moov', mvhd, trak, mvex)
+        moov = mp4(None, 0)[len(box(b'ftyp', b'isom\0\0\0\0')):]
         # Five samples of the default 1,000 units, then two at an explicit decode time.
         first = box(b'moof', box(b'traf', full(b'tfhd', 8, struct.pack('>II', 1, 1000)),
                                  full(b'trun', 0, struct.pack('>I', 5))))
@@ -153,6 +188,14 @@ class RealWorldQuirkTests(unittest.TestCase):
         self.assertEqual(self.probe(head + second[:20]), (0, 'h264'))
         self.assertEqual(self.probe(head + b'\0' * 4096 + second), (0, 'h264'))
         self.assertEqual(self.probe(head + box(b'free') * 200000 + second), (0, 'h264'))
+
+    def test_fragmented_mp4_with_samples_in_moov(self):
+        # FFmpeg's frag_keyframe without empty_moov: mvhd and mdhd cover only the first second.
+        fragments = moof(1000, 5) + moof(1000, 2, 6000)
+        self.assertEqual(self.probe(mp4(1000, 1000) + fragments), (8, 'h264'))
+        # With mehd, its total wins over mvhd.
+        mehd = full(b'mehd', 0, struct.pack('>I', 8000))
+        self.assertEqual(self.probe(mp4(1000, 1000, mehd) + moof(1000, 7)), (8, 'h264'))
 
     def test_damage_in_mp3_and_adts_frame_counts(self):
         mp3 = b'\xff\xfb\x90\x64' + b'\0' * 413  # 128 kbps, 44.1 kHz: 1,152 samples.
@@ -187,22 +230,85 @@ class RealWorldQuirkTests(unittest.TestCase):
 
     def test_m2ts_sync_byte_at_offset_188_and_last_packet(self):
         def packet(pid, payload):
-            body = payload + b'\xff' * (184 - len(payload))
-            return b'\0' * 4 + bytes((0x47, 0x40 | pid >> 8, pid & 0xff, 0x10)) + body
-        def pes(pts):
-            stamp = bytes((0x21 | (pts >> 29 & 0x0e), pts >> 22 & 0xff, (pts >> 14 & 0xfe) | 1,
-                           pts >> 7 & 0xff, (pts << 1 & 0xfe) | 1))
-            return packet(0x100, b'\0\0\1\xe0\0\0\x80\x80\x05' + stamp)
+            return ts_packet(pid, payload, b'\0' * 4)
         pat = packet(0, b'\0\x00\xb0\x0d\0\x01\xc1\0\0' + b'\0\x01\xf0\x00' + b'\0' * 4)
         pmt = packet(0x1000, b'\0\x02\xb0\x12\0\x01\xc1\0\0' + b'\xe1\x00\xf0\x00' +
                      b'\x1b\xe1\x00\xf0\x00' + b'\0' * 4)
-        data = bytearray(pat + pmt + pes(0) + pes(900000))
+        data = bytearray(pat + pmt + packet(0x100, pes(0xe0, 0)) + packet(0x100, pes(0xe0, 900000)))
         data[188] = 0x47  # Inside the first packet's stuffing. The last PTS is in the last packet.
         self.assertEqual(self.probe(bytes(data)), (10, 'h264'))
 
+    def test_bluray_stream_types_need_an_hdmv_registration(self):
+        def pmt(registration):
+            info = b'\x05\x04HDMV' if registration else b''
+            streams = b'\x80\xe1\x00\xf0\x00' + b'\x81\xe1\x01\xf0\x00'
+            section = (b'\0\x01\xc1\0\0' + b'\xe1\x00' + struct.pack('>H', 0xf000 | len(info)) +
+                       info + streams)
+            return ts_packet(0x1000, b'\0\x02' + struct.pack('>H', 0xb000 | len(section) + 4) +
+                             section + b'\0' * 4)
+        pat = ts_packet(0, b'\0\x00\xb0\x0d\0\x01\xc1\0\0' + b'\0\x01\xf0\x00' + b'\0' * 4)
+        timing = b''.join(ts_packet(pid, pes(0xbd, pts)) for pts in (0, 900000) for pid in (0x100, 0x101))
+        # Outside Blu-ray, 0x80 is MPEG-2 video in DigiCipher II, so only the AC-3 stream counts.
+        self.assertEqual(self.probe(pat + pmt(False) + timing), (10, 'ac3'))
+        self.assertEqual(self.probe(pat + pmt(True) + timing), (10, 'pcm_bluray'))
+
+    def test_h264_in_mpeg_ps_is_not_mpeg_video(self):
+        pack = b'\0\0\1\xba\x44\x00\x04\x00\x04\x01\x01\x89\xc3\xf8'
+        h264 = b'\0\0\0\1\x09\xf0\0\0\0\1\x67\x64\x00\x1e'
+        sequence = b'\0\0\1\xb3\x04\x00\x30\x13\xff\xff\xe0\x18'
+        for payload, codec in ((h264, ''), (sequence, 'mpeg1video')):
+            with self.subTest(codec=codec):
+                data = pack + pes(0xe0, 0, payload) + pack + pes(0xe0, 900000, payload) + b'\0\0\1\xb9'
+                self.assertEqual(self.probe(data), (10, codec))
+
+    def test_avi_written_to_a_pipe(self):
+        # FFmpeg cannot seek back: no RIFF size, no avih frame count, a placeholder strh length.
+        avih = struct.pack('<14I', 40000, 0, 0, 0, 0, 0, 1, 0, 64, 48, 0, 0, 0, 0)
+        strh = b'vidsXVID' + struct.pack('<IHHIIIIIIII4H', 0, 0, 0, 0, 1, 25, 0, 0x40000000, 0, 0, 0,
+                                         0, 0, 0, 0)
+        strf = struct.pack('<IiiHH', 40, 64, 48, 1, 24) + b'XVID' + b'\0' * 20
+        strl = chunk(b'LIST', b'strl' + chunk(b'strh', strh) + chunk(b'strf', strf))
+        body = b'AVI ' + chunk(b'LIST', b'hdrl' + chunk(b'avih', avih) + strl) + chunk(b'LIST', b'movi')
+        self.assertEqual(self.probe(b'RIFF\xff\xff\xff\xff' + body), (0, 'mpeg4'))
+
+    def test_chained_ogg_has_no_duration(self):
+        def link(serial, seconds):
+            def page(kind, granule, packet):
+                return (b'OggS\0' + bytes((kind,)) + struct.pack('<QIII', granule, serial, 0, 0) +
+                        bytes((1, len(packet))) + packet)
+            head = b'OpusHead\x01\x01' + struct.pack('<HIhB', 0, 48000, 0, 0)
+            return (page(2, 0, head) + page(0, 0, b'OpusTags' + struct.pack('<II', 0, 0)) +
+                    page(4, 48000 * seconds, b'\xf8'))
+        self.assertEqual(self.probe(link(7, 5)), (5, 'opus'))
+        self.assertEqual(self.probe(link(7, 5) + link(8, 7)), (0, 'opus'))
+
+    def test_joined_mp3_files_with_an_info_header(self):
+        def part(frames):
+            frame = b'\xff\xfb\x90\x64' + b'\0' * 413  # 417 bytes, 1,152 samples at 44.1 kHz.
+            info = (b'\xff\xfb\x90\x64' + b'\0' * 32 + b'Info' +
+                    struct.pack('>3I', 3, frames, 417 * (frames + 1)))
+            return info + b'\0' * (417 - len(info)) + frame * frames
+        self.assertEqual(self.probe(part(250)), (7, 'mp3'))
+        # The second part's frames are counted, as FFmpeg does past 1/16 more than the header says.
+        self.assertEqual(self.probe(part(250) + part(250)), (13, 'mp3'))
+
+    def test_flv_keyframe_index_longer_than_the_value_cap(self):
+        def number(key, value):
+            return struct.pack('>H', len(key)) + key + b'\0' + struct.pack('>d', value)
+        def array(key, count):
+            return (struct.pack('>H', len(key)) + key + b'\x0a' + struct.pack('>I', count) +
+                    (b'\0' + struct.pack('>d', 1.0)) * count)
+        keyframes = b'\x03' + array(b'times', 5000) + array(b'filepositions', 5000) + b'\0\0\x09'
+        meta = (b'\x02\0\x0aonMetaData\x08' + struct.pack('>I', 3) + number(b'duration', 200.0) +
+                number(b'videocodecid', 2.0) + struct.pack('>H', 9) + b'keyframes' + keyframes +
+                b'\0\0\x09')
+        tag = b'\x12' + len(meta).to_bytes(3, 'big') + b'\0' * 7 + meta
+        video = b'\x09' + (1).to_bytes(3, 'big') + b'\0' * 7 + b'\x12'
+        data = (b'FLV\x01\x01\0\0\0\x09\0\0\0\0' + tag + struct.pack('>I', len(tag)) + video +
+                struct.pack('>I', len(video)))
+        self.assertEqual(self.probe(data), (200, 'flv1'))
+
     def test_avi_ignores_dmlh_counting_every_chunk(self):
-        def chunk(cid, payload):
-            return cid + struct.pack('<I', len(payload)) + payload + b'\0' * (len(payload) & 1)
         avih = struct.pack('<14I', 40000, 0, 0, 0, 50, 0, 2, 0, 0, 0, 0, 0, 0, 0)
         strh = b'vidsXVID' + struct.pack('<IHHIIIIIIII4H', 0, 0, 0, 0, 1, 25, 0, 50, 0, 0, 0, 0, 0, 0, 0)
         strf = struct.pack('<IiiHH', 40, 64, 48, 1, 24) + b'XVID' + b'\0' * 20

@@ -451,8 +451,8 @@ void parseMp4(Reader &r, Result &res)
 	const bool complete = boxes(r, 0, r.size(), visitTop, true);
 	if (!moov)
 		throw Malformed{};
-	if (!duration)
-		duration = fragments;
+	// In a fragmented file mvhd may cover only the samples in moov.
+	duration = std::max(duration, fragments);
 	if (duration && scale)
 		res.seconds = double(duration) / scale;
 	else

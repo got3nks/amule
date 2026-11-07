@@ -115,6 +115,16 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result['length_seconds'], 0)
         self.assertEqual(result['codec'], 'pcm_u8')
 
+    def test_short_audio_without_a_codec_is_no_metadata(self):
+        # 0.3 s of 12-bit PCM: no codec name and a length that rounds to 0.
+        fmt = struct.pack('<HHIIHH', 1, 1, 8000, 16000, 2, 12)
+        data = bytes(2400 * 2)
+        body = (b'WAVE' + b'fmt ' + struct.pack('<I', len(fmt)) + fmt + b'data' +
+                struct.pack('<I', len(data)) + data)
+        self.path.write_bytes(b'RIFF' + struct.pack('<I', len(body)) + body)
+        p = self.run_probe()
+        self.assertEqual(p.returncode, 10, p.stdout)
+
     def test_raw_h264_never_publishes_partial_duration(self):
         ffmpeg = shutil.which('ffmpeg')
         if not ffmpeg:
@@ -217,74 +227,6 @@ class HelperTests(unittest.TestCase):
             tested += 1
         if not tested:
             self.skipTest('no fixture encoders available')
-
-    def test_bluray_stream_types_need_hdmv_registration(self):
-        ffmpeg = shutil.which('ffmpeg')
-        if not ffmpeg:
-            self.skipTest('fixture requires ffmpeg')
-        self.path = Path(self.tmp.name) / 'dcii.ts'
-        subprocess.run([ffmpeg, '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i',
-                        'testsrc2=size=320x240:rate=25:duration=2', '-f', 'lavfi', '-i',
-                        'sine=sample_rate=48000:duration=2', '-c:v', 'mpeg2video', '-c:a', 'mp2',
-                        str(self.path)], check=True, capture_output=True, timeout=30)
-        # DigiCipher II gives MPEG-2 video type 0x80, which is LPCM only in HDMV streams.
-        data = bytearray(self.path.read_bytes())
-        for p in range(0, len(data) - 188, 188):
-            q = p + 5 + data[p + 4]
-            if data[p + 1] == 0x50 and data[p + 2] == 0x00 and data[q] == 0x02:  # FFmpeg's PMT
-                entry = q + 12 + ((data[q + 10] & 0x0F) << 8 | data[q + 11])
-                if data[entry] == 0x02:
-                    data[entry] = 0x80
-        self.path.write_bytes(data)
-        result = self.run_probe()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout)['codec'], 'mp2')
-
-    def test_layouts_that_ffmpeg_writes(self):
-        ffmpeg = shutil.which('ffmpeg')
-        if not ffmpeg:
-            self.skipTest('fixtures require ffmpeg')
-        encoders = subprocess.run([ffmpeg, '-hide_banner', '-encoders'], capture_output=True).stdout
-
-        def make(name, source, *options, pipe=False):
-            path = Path(self.tmp.name) / name
-            command = [ffmpeg, '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i', source, *options]
-            output = subprocess.run(command + (['-'] if pipe else [str(path)]), check=True,
-                                    capture_output=True, timeout=60).stdout
-            if pipe:
-                path.write_bytes(output)
-            return path
-
-        def probe(*paths):
-            self.path = Path(self.tmp.name) / 'probed'
-            self.path.write_bytes(b''.join(p.read_bytes() for p in paths))
-            result = self.run_probe()
-            self.assertEqual(result.returncode, 0, result.stderr)
-            info = json.loads(result.stdout)
-            return info['length_seconds'], info['codec']
-
-        video = 'testsrc2=size=64x64:rate=25:duration=10'
-        # mvhd covers only the samples in moov, here the first fragment.
-        self.assertEqual(probe(make('f.mp4', video, '-c:v', 'mpeg4', '-g', '25', '-movflags',
-                                    'frag_keyframe')), (10, 'mpeg4'))
-        # Without seeking back, the AVI lengths stay placeholders.
-        self.assertEqual(probe(make('p.avi', video, '-c:v', 'mpeg4', '-f', 'avi', pipe=True)),
-                         (0, 'mpeg4'))
-        # Later links of a chained Ogg file are not counted, so there is no duration.
-        first = make('a.ogg', 'sine=duration=5', '-c:a', 'flac')
-        second = make('b.ogg', 'sine=duration=5', '-c:a', 'flac', '-serial_offset', '7')
-        self.assertEqual(probe(first), (5, 'flac'))
-        self.assertEqual(probe(first, second), (0, 'flac'))
-        # A keyframe index longer than the cap on AMF values.
-        self.assertEqual(probe(make('k.flv', 'testsrc2=size=64x64:rate=25:duration=200', '-c:v',
-                                    'flv1', '-g', '1', '-flvflags', 'add_keyframe_index')),
-                         (200, 'flv1'))
-        if b'libx264' in encoders:
-            self.assertEqual(probe(make('h.mpg', video, '-c:v', 'libx264', '-f', 'mpeg')), (10, ''))
-        if b'libmp3lame' in encoders:
-            # Joined files keep the first part's Xing header.
-            part = make('a.mp3', 'sine=duration=5', '-c:a', 'libmp3lame')
-            self.assertEqual(probe(part, part), (10, 'mp3'))
 
     def test_control_characters_cannot_inject_records(self):
         payload = b'Name\nformat.duration=99999\r\nEND\0'
