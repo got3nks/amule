@@ -586,10 +586,43 @@ void CSearch::ProcessResponse(
 	}
 }
 
+namespace
+{
+// Diagnostic only: the nodes that stored each file's source at its last publish.
+struct SStoredAt
+{
+	uint64_t started;
+	StoreNodes nodes;
+};
+std::map<CUInt128, SStoredAt> s_storedAt;
+
+void LogStoreNodeOverlap(const CUInt128 &target, const CLookupTrace &trace, uint64_t started)
+{
+	StoreNodes now = AcknowledgingNodes(trace);
+	const auto previous = s_storedAt.find(target);
+	if (previous != s_storedAt.end()) {
+		const SStoreNodeOverlap overlap = CompareStoreNodes(previous->second.nodes, trace);
+		AddDebugLogLineN(logKadPublish,
+			CFormat("Kad source republish overlap: target=%s age=%llu previous=%u queried=%u "
+				"replied=%u acknowledged=%u moved=%u replaced=%u now=%u") %
+				target.ToHexString() % ((started - previous->second.started) / 1000) %
+				overlap.previous % overlap.queried % overlap.replied % overlap.acknowledged %
+				overlap.moved % overlap.replaced % static_cast<uint32_t>(now.size()));
+	}
+	// Keep the last set that stored it, so a failed lookup is compared with that one next.
+	if (!now.empty()) {
+		s_storedAt[target] = { started, std::move(now) };
+	}
+}
+} // namespace
+
 void CSearch::RecordStoreAcknowledgements() const
 {
 	if (m_type != STOREFILE) {
 		return;
+	}
+	if (theLogger.IsEnabled(logKadPublish)) {
+		LogStoreNodeOverlap(m_target, m_lookupTrace, m_lookupStarted);
 	}
 	const uint64_t acknowledged = CPublishMetrics::Acknowledged(m_lookupTrace);
 	theStats::AddPublishEvent(EPublishEvent::KadSourceStoreAcknowledged, acknowledged);

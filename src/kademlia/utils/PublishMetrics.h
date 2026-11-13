@@ -191,5 +191,56 @@ private:
 	bool reportStarted = false;
 	uint64_t lastReport = 0, changes = 0, reportedChanges = 0;
 };
+
+// Diagnostic only: whether the nodes that stored a file's source are still the ones its next
+// lookup finds, which decides if a refresh could skip the lookup.
+using StoreNodes = std::map<CLookupTrace::ID, CLookupTrace::Address>;
+
+inline StoreNodes AcknowledgingNodes(const CLookupTrace &trace)
+{
+	StoreNodes nodes;
+	for (const auto &peer : trace.Peers()) {
+		if (peer.second.itemReplies) {
+			nodes[peer.second.id] = peer.first;
+		}
+	}
+	return nodes;
+}
+
+struct SStoreNodeOverlap
+{
+	uint32_t previous = 0;
+	uint32_t queried = 0;      // The lookup asked it again.
+	uint32_t replied = 0;      // It answered that request.
+	uint32_t acknowledged = 0; // It stored the entry again.
+	uint32_t moved = 0;        // Same Kad ID, another address.
+	uint32_t replaced = 0;     // Same address, another Kad ID.
+};
+
+inline SStoreNodeOverlap CompareStoreNodes(const StoreNodes &previous, const CLookupTrace &trace)
+{
+	std::map<CLookupTrace::ID, std::pair<CLookupTrace::Address, const CLookupTrace::Peer *>> byID;
+	for (const auto &peer : trace.Peers()) {
+		byID[peer.second.id] = { peer.first, &peer.second };
+	}
+	SStoreNodeOverlap overlap;
+	for (const auto &node : previous) {
+		++overlap.previous;
+		const auto found = byID.find(node.first);
+		if (found == byID.end()) {
+			const auto atAddress = trace.Peers().find(node.second);
+			if (atAddress != trace.Peers().end() && atAddress->second.id != node.first) {
+				++overlap.replaced;
+			}
+			continue;
+		}
+		const CLookupTrace::Peer &peer = *found->second.second;
+		overlap.queried += peer.requests ? 1 : 0;
+		overlap.replied += peer.replies ? 1 : 0;
+		overlap.acknowledged += peer.itemReplies ? 1 : 0;
+		overlap.moved += found->second.first != node.second ? 1 : 0;
+	}
+	return overlap;
+}
 } // namespace Kademlia
 #endif

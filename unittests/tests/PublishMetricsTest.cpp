@@ -115,3 +115,43 @@ TEST(PublishMetrics, PerIPThresholdsSinceLastReport)
 	ASSERT_EQUALS(size_t(1), metrics.reportedPublishIPs[1].count(3));
 	ASSERT_EQUALS(uint64_t(3), metrics.publishRequests.peak);
 }
+
+TEST(PublishMetrics, StoreNodeOverlapFindsTheSameNodesAgain)
+{
+	const auto id = [](uint8_t n) {
+		CLookupTrace::ID value{};
+		value[0] = n;
+		return value;
+	};
+	// Last time nodes 1-5 stored the entry.
+	CLookupTrace before;
+	for (uint8_t n = 1; n <= 5; ++n) {
+		before.Query({ n, 4672 }, id(n), 0);
+		before.ItemRequest({ n, 4672 });
+		before.ItemReply({ n, 4672 });
+	}
+	before.Query({ 9, 4672 }, id(9), 0); // Asked, but never stored it.
+	const StoreNodes previous = AcknowledgingNodes(before);
+	ASSERT_EQUALS(size_t(5), previous.size());
+
+	CLookupTrace after;
+	after.Query({ 1, 4672 }, id(1), 0); // Stored it again.
+	after.Reply({ 1, 4672 }, 1);
+	after.ItemRequest({ 1, 4672 });
+	after.ItemReply({ 1, 4672 });
+	after.Query({ 2, 4672 }, id(2), 0); // Answered, but was not among the closest.
+	after.Reply({ 2, 4672 }, 1);
+	after.Query({ 3, 4672 }, id(3), 0);  // Asked, no answer.
+	after.Query({ 40, 4672 }, id(4), 0); // Node 4 at a new address, stored it again.
+	after.Reply({ 40, 4672 }, 1);
+	after.ItemRequest({ 40, 4672 });
+	after.ItemReply({ 40, 4672 });
+	after.Query({ 5, 4672 }, id(50), 0); // Node 5's address now has another ID.
+	const SStoreNodeOverlap overlap = CompareStoreNodes(previous, after);
+	ASSERT_EQUALS(uint32_t(5), overlap.previous);
+	ASSERT_EQUALS(uint32_t(4), overlap.queried);
+	ASSERT_EQUALS(uint32_t(3), overlap.replied);
+	ASSERT_EQUALS(uint32_t(2), overlap.acknowledged);
+	ASSERT_EQUALS(uint32_t(1), overlap.moved);
+	ASSERT_EQUALS(uint32_t(1), overlap.replaced);
+}
