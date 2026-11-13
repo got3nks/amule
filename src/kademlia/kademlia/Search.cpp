@@ -891,8 +891,26 @@ void CSearch::StorePacket()
 				m_lookupTrace.ItemRequest({ from->GetIPAddress(), from->GetUDPPort() });
 				theStats::AddPublishEvent(EPublishEvent::KadSourceStoreSent);
 				if (theLogger.IsEnabled(logKadPublish)) {
-					CPublishMetrics::Instance().Queued(
-						from->GetIPAddress(), ::GetTickCount64());
+					auto &metrics = CPublishMetrics::Instance();
+					metrics.Queued(from->GetIPAddress(), ::GetTickCount64());
+					// Diagnostic only: name the nodes receivers would refuse (2 a
+					// minute).
+					const uint64_t count =
+						metrics.publishRequests.Count(from->GetIPAddress());
+					if (count > 2) {
+						AddDebugLogLineN(logKadPublish,
+							CFormat("Kad source publish over limit: node=%s "
+								"kadid=%s "
+								"version=%u distance=%s target=%s "
+								"count=%llu") %
+								KadIPPortToString(from->GetIPAddress(),
+									from->GetUDPPort()) %
+								from->GetClientIDString() %
+								from->GetVersion() %
+								(from->GetClientID() ^ m_target)
+									.ToHexString() %
+								m_target.ToHexString() % count);
+					}
 				}
 			}
 			m_totalRequestAnswers++;

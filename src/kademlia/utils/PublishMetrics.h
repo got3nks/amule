@@ -83,6 +83,11 @@ public:
 		reached.swap(m_reached);
 		return reached;
 	}
+	uint64_t Count(uint32_t ip) const
+	{
+		const auto it = m_counts.find(ip);
+		return it == m_counts.end() ? 0 : it->second;
+	}
 	uint64_t peak = 0, omitted = 0;
 
 private:
