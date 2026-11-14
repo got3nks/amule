@@ -204,3 +204,59 @@ TEST(PublishMetrics, SparesAndFreshNodes)
 	ASSERT_EQUALS(uint32_t(2), overlap.fresh);         // Nodes 6 and 7.
 	ASSERT_EQUALS(uint32_t(1), overlap.freshReferred); // Only node 6.
 }
+
+TEST(PublishMetrics, DryLookupsComparedOnTheClosestNodes)
+{
+	const auto near = [](uint8_t n) {
+		CLookupTrace::ID value{};
+		value[1] = n; // Inside the store tolerance.
+		return value;
+	};
+	const auto far = [](uint8_t n) {
+		CLookupTrace::ID value{};
+		value[0] = n;
+		return value;
+	};
+	const auto ask =
+		[](CLookupTrace &trace, uint8_t n, const CLookupTrace::ID &distance, bool reply, bool store) {
+			trace.Query({ n, 4672 }, distance, 0, 8, distance);
+			if (reply) {
+				trace.Reply({ n, 4672 }, 1);
+			}
+			if (store) {
+				trace.ItemRequest({ n, 4672 });
+			}
+		};
+	CLookupTrace seededTrace;
+	ask(seededTrace, 1, near(1), true, true);
+	ask(seededTrace, 2, near(2), true, true);
+	ask(seededTrace, 3, near(3), true, false);
+	ask(seededTrace, 4, near(4), false, false); // Never answered: not a reference node.
+	ask(seededTrace, 20, far(20), true, false);
+	ask(seededTrace, 20, far(20), true, false); // Asked twice.
+	CLookupTrace fullTrace;
+	ask(fullTrace, 30, far(30), true, false);
+	ask(fullTrace, 1, near(1), true, false);
+	ask(fullTrace, 2, near(2), true, true);
+	ask(fullTrace, 5, near(5), true, true);
+
+	const SDryLookup seeded = SummariseDryLookup(seededTrace);
+	ASSERT_EQUALS(uint32_t(6), seeded.requests);
+	ASSERT_EQUALS(size_t(5), seeded.queried.size());
+	ASSERT_EQUALS(uint32_t(1), seeded.far);
+	ASSERT_EQUALS(size_t(4), seeded.replied.size());
+	ASSERT_EQUALS(size_t(3), seeded.near.size());
+	ASSERT_EQUALS(size_t(2), seeded.stored.size());
+
+	const SDryLookup full = SummariseDryLookup(fullTrace);
+	// Reference nodes 1, 2, 3 and 5.
+	const SDryComparison wide = CompareDryLookups(seeded, full, 4);
+	ASSERT_EQUALS(uint32_t(4), wide.reference);
+	ASSERT_EQUALS(uint32_t(2), wide.seededRecall);
+	ASSERT_EQUALS(uint32_t(2), wide.fullRecall);
+	ASSERT_EQUALS(uint32_t(1), wide.common);
+	// Reference nodes 1, 2 and 3.
+	const SDryComparison narrow = CompareDryLookups(seeded, full, 3);
+	ASSERT_EQUALS(uint32_t(3), narrow.reference);
+	ASSERT_EQUALS(uint32_t(1), narrow.fullRecall);
+}

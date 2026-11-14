@@ -65,8 +65,27 @@ class CSearch
 	uint64_t m_probeSize = 0;
 	CUInt128 m_probeSource;
 	std::set<CLookupTrace::Address> m_probeHits;
+	// Diagnostic: a source-publish lookup that only notes where it would store.
+	bool m_dryStore = false;
+	uint64_t m_stopTick = 0;
 
 public:
+	// Diagnostic: enough of a contact to ask it again later.
+	struct SSeed
+	{
+		CUInt128 id;
+		uint32_t ip;
+		uint16_t udpPort;
+		uint16_t tcpPort;
+		uint8_t version;
+		CKadUDPKey key;
+		bool verified;
+	};
+	// Start from these contacts as well as the routing table. Call before Go().
+	void Seed(const std::vector<SSeed> &seeds);
+	// The closest nodes that answered within SEARCHTOLERANCE, closest first.
+	std::vector<SSeed> AnsweredNear(size_t limit) const;
+
 	const CLookupTrace &GetLookupTrace() const noexcept { return m_lookupTrace; }
 	uint64_t GetLookupStarted() const noexcept { return m_lookupStarted; }
 	// For a finished source publish: counts the nodes that stored our entry and records them

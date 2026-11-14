@@ -319,5 +319,67 @@ inline SSpareOverlap CompareSpares(const SStoreSet &previous, const CLookupTrace
 	}
 	return overlap;
 }
+
+// Diagnostic only: one source-publish lookup that did not store, to compare a lookup seeded
+// with the last nodes against one started from the routing table.
+struct SDryLookup
+{
+	uint32_t requests = 0;
+	uint32_t far = 0; // Nodes asked outside the store tolerance: hops lookups share.
+	std::set<CLookupTrace::ID> queried, replied, stored;
+	std::map<CLookupTrace::ID, CLookupTrace::ID> near; // Distance to ID, answered inside tolerance.
+};
+
+inline SDryLookup SummariseDryLookup(const CLookupTrace &trace)
+{
+	SDryLookup lookup;
+	for (const auto &peer : trace.Peers()) {
+		const CLookupTrace::Peer &row = peer.second;
+		if (!row.requests) {
+			continue;
+		}
+		lookup.requests += row.requests;
+		lookup.queried.insert(row.id);
+		// SEARCHTOLERANCE: the top 8 distance bits are zero.
+		lookup.far += row.distance[0] != 0 ? 1 : 0;
+		if (row.replies) {
+			lookup.replied.insert(row.id);
+			if (row.distance[0] == 0) {
+				lookup.near[row.distance] = row.id;
+			}
+		}
+		if (row.itemRequests) {
+			lookup.stored.insert(row.id);
+		}
+	}
+	return lookup;
+}
+
+struct SDryComparison
+{
+	uint32_t reference = 0; // Closest nodes either lookup heard from inside the tolerance.
+	uint32_t seededRecall = 0;
+	uint32_t fullRecall = 0;
+	uint32_t common = 0; // Stored by both.
+};
+
+inline SDryComparison CompareDryLookups(const SDryLookup &seeded, const SDryLookup &full, size_t size = 10)
+{
+	std::map<CLookupTrace::ID, CLookupTrace::ID> near = seeded.near;
+	near.insert(full.near.begin(), full.near.end());
+	SDryComparison comparison;
+	for (const auto &node : near) {
+		if (comparison.reference == size) {
+			break;
+		}
+		++comparison.reference;
+		comparison.seededRecall += seeded.stored.count(node.second) ? 1 : 0;
+		comparison.fullRecall += full.stored.count(node.second) ? 1 : 0;
+	}
+	for (const auto &id : seeded.stored) {
+		comparison.common += full.stored.count(id) ? 1 : 0;
+	}
+	return comparison;
+}
 } // namespace Kademlia
 #endif

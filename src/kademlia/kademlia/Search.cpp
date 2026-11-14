@@ -214,7 +214,7 @@ CSearch::~CSearch()
 
 void CSearch::Go()
 {
-	if (m_type == STOREFILE && !m_publishMeasured && theLogger.IsEnabled(logKadPublish)) {
+	if (m_type == STOREFILE && !m_dryStore && !m_publishMeasured && theLogger.IsEnabled(logKadPublish)) {
 		m_publishMeasured = true;
 		CPublishMetrics::Instance().Start();
 	}
@@ -251,6 +251,7 @@ void CSearch::PrepareToStop() noexcept
 	if (m_stopping) {
 		return;
 	}
+	m_stopTick = ::GetTickCount64();
 
 	uint32_t baseTime = 0;
 	switch (m_type) {
@@ -646,9 +647,51 @@ void LogStoreNodeOverlap(const CUInt128 &target, const CLookupTrace &trace, uint
 }
 } // namespace
 
+void CSearch::Seed(const std::vector<SSeed> &seeds)
+{
+	wxASSERT(m_possible.empty());
+	CUInt128 distance(CKademlia::GetPrefs()->GetKadID() ^ m_target);
+	CKademlia::GetRoutingZone()->GetClosestTo(3, m_target, distance, 50, &m_possible, true, true);
+	for (const SSeed &seed : seeds) {
+		const CUInt128 seedDistance(seed.id ^ m_target);
+		if (m_possible.count(seedDistance)) {
+			continue;
+		}
+		CContact *c = new CContact(
+			seed.id, seed.ip, seed.udpPort, seed.tcpPort, seed.version, seed.key, seed.verified);
+		// Released with the routing-table contacts, then freed with m_delete.
+		c->IncUse();
+		m_delete.push_back(c);
+		m_possible[seedDistance] = c;
+	}
+}
+
+std::vector<CSearch::SSeed> CSearch::AnsweredNear(size_t limit) const
+{
+	std::vector<SSeed> near;
+	for (const auto &responded : m_responded) {
+		if (near.size() == limit || responded.first.Get32BitChunk(0) > SEARCHTOLERANCE) {
+			break;
+		}
+		const auto tried = m_tried.find(responded.first);
+		if (tried == m_tried.end()) {
+			continue;
+		}
+		const CContact *c = tried->second;
+		near.push_back({ c->GetClientID(),
+			c->GetIPAddress(),
+			c->GetUDPPort(),
+			c->GetTCPPort(),
+			c->GetVersion(),
+			c->GetUDPKey(),
+			c->IsIPVerified() });
+	}
+	return near;
+}
+
 void CSearch::RecordStoreAcknowledgements() const
 {
-	if (m_type != STOREFILE) {
+	if (m_type != STOREFILE || m_dryStore) {
 		return;
 	}
 	if (theLogger.IsEnabled(logKadPublish)) {
@@ -858,6 +901,13 @@ void CSearch::StorePacket()
 		// As a safeguard, check to see if we already stored to the max nodes.
 		if (m_answers > SEARCHSTOREFILE_TOTAL) {
 			PrepareToStop();
+			break;
+		}
+		if (m_dryStore) {
+			// Counted as if acknowledged, so the lookup stops where a publish would.
+			m_answers++;
+			m_totalRequestAnswers++;
+			m_lookupTrace.ItemRequest({ from->GetIPAddress(), from->GetUDPPort() });
 			break;
 		}
 

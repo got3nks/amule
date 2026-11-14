@@ -340,6 +340,8 @@ bool ParseKadHex(const std::string &hex, CUInt128 &value)
 	value.SetValueBE(bytes.GetHash());
 	return true;
 }
+
+size_t s_seededTargets = 0; // "seeded <count>" in kadprobe.txt.
 } // namespace
 
 // Diagnostic: with kadprobe.txt in the config dir ("source <id>", then "<target> <size>" lines,
@@ -355,7 +357,6 @@ void CSearchManager::RunSourceProbe()
 	static bool loaded = false;
 	static std::vector<SProbeFile> files;
 	static CUInt128 source;
-	static size_t next = 0;
 	static time_t last = 0;
 	if (!loaded) {
 		loaded = true;
@@ -365,6 +366,8 @@ void CSearchManager::RunSourceProbe()
 			SProbeFile file;
 			if (key == "source") {
 				ParseKadHex(value, source);
+			} else if (key == "seeded") {
+				s_seededTargets = std::stoul(value);
 			} else if (ParseKadHex(key, file.target)) {
 				file.size = std::stoull(value);
 				files.push_back(file);
@@ -379,7 +382,8 @@ void CSearchManager::RunSourceProbe()
 		return;
 	}
 	last = now;
-	const SProbeFile &file = files[next++ % files.size()];
+	// By the clock, so a restart keeps each file's probe about an hour apart.
+	const SProbeFile &file = files[(now / 30) % files.size()];
 	CSearch *search = PrepareLookup(CSearch::FILE, false, file.target);
 	if (search) {
 		search->m_probeSize = file.size;
@@ -388,9 +392,174 @@ void CSearchManager::RunSourceProbe()
 	}
 }
 
+namespace
+{
+struct SSeedTarget
+{
+	time_t interval = 0;
+	time_t due = 0;
+	std::vector<CSearch::SSeed> seeds;
+	time_t seedsAt = 0;
+	time_t roundStart = 0;
+	int pending = 0; // Lookups of this round still to finish.
+	bool running = false;
+	bool runningSeeded = false;
+	bool seededFirst = false;
+	SDryLookup first;
+	uint64_t firstMs = 0;
+	std::vector<CSearch::SSeed> firstNear;
+};
+std::map<CUInt128, SSeedTarget> s_seedTargets;
+
+std::set<CLookupTrace::ID> SeedIDs(const std::vector<CSearch::SSeed> &seeds)
+{
+	std::set<CLookupTrace::ID> ids;
+	for (const auto &seed : seeds) {
+		CLookupTrace::ID id;
+		seed.id.ToByteArray(id.data());
+		ids.insert(id);
+	}
+	return ids;
+}
+
+uint32_t CountIn(const std::set<CLookupTrace::ID> &ids, const std::set<CLookupTrace::ID> &in)
+{
+	uint32_t count = 0;
+	for (const auto &id : ids) {
+		count += in.count(id) ? 1 : 0;
+	}
+	return count;
+}
+} // namespace
+
+// Diagnostic: with "seeded <count>" in kadprobe.txt, run source-publish lookups that store
+// nothing on random targets. Each round runs one lookup seeded with the nodes the last seeded
+// one heard from inside the tolerance, and one from the routing table, then logs both.
+void CSearchManager::RunSeedCompare()
+{
+	static time_t lastStart = 0;
+	const time_t now = time(nullptr);
+	if (!s_seededTargets || !CKademlia::IsConnected() || now - lastStart < 5) {
+		return;
+	}
+	if (s_seedTargets.empty()) {
+		const time_t intervals[] = { HR2S(1), HR2S(3), HR2S(5) };
+		for (size_t i = 0; i < s_seededTargets; ++i) {
+			SSeedTarget &target = s_seedTargets[GetRandomUint128()];
+			target.interval = intervals[i % 3];
+			target.due = now + static_cast<time_t>(i) * 15;
+		}
+		AddLogLineN(CFormat("Kad seeded compare: %u targets") % s_seedTargets.size());
+	}
+	size_t running = 0;
+	for (const auto &item : s_seedTargets) {
+		running += item.second.running ? 1 : 0;
+	}
+	if (running >= 4) {
+		return;
+	}
+	for (auto &item : s_seedTargets) {
+		SSeedTarget &target = item.second;
+		if (target.running || (!target.pending && target.due > now)) {
+			continue;
+		}
+		static uint32_t rounds = 0;
+		const bool newRound = !target.seeds.empty() && !target.pending;
+		const bool seeded = newRound ? rounds % 2 == 0 : target.pending && !target.seededFirst;
+		CSearch *search = PrepareLookup(CSearch::STOREFILE, false, item.first);
+		if (!search) {
+			continue;
+		}
+		search->m_dryStore = true;
+		if (seeded) {
+			search->Seed(target.seeds);
+		}
+		lastStart = now;
+		if (!StartSearch(search)) {
+			return;
+		}
+		if (newRound) {
+			++rounds;
+			target.pending = 2;
+			target.seededFirst = seeded;
+			target.roundStart = now;
+		}
+		target.running = true;
+		target.runningSeeded = seeded;
+		return;
+	}
+}
+
+void CSearchManager::RecordSeedCompare(const CSearch &search)
+{
+	const auto found = s_seedTargets.find(search.GetTarget());
+	if (found == s_seedTargets.end()) {
+		return;
+	}
+	SSeedTarget &target = found->second;
+	target.running = false;
+	const time_t now = time(nullptr);
+	const SDryLookup lookup = SummariseDryLookup(search.m_lookupTrace);
+	const uint64_t ms =
+		(search.m_stopTick ? search.m_stopTick : ::GetTickCount64()) - search.GetLookupStarted();
+	if (target.seeds.empty()) {
+		target.seeds = search.AnsweredNear(20);
+		target.seedsAt = now;
+		target.due = now + (target.seeds.empty() ? MIN2S(10) : target.interval);
+		AddDebugLogLineN(logKadPublish,
+			CFormat("Kad seeded init: target=%s interval=%u requests=%u queried=%u far=%u "
+				"stored=%u ms=%llu seeds=%u") %
+				search.GetTarget().ToHexString() % static_cast<uint32_t>(target.interval) %
+				lookup.requests % static_cast<uint32_t>(lookup.queried.size()) % lookup.far %
+				static_cast<uint32_t>(lookup.stored.size()) % ms %
+				static_cast<uint32_t>(target.seeds.size()));
+		return;
+	}
+	if (target.pending == 2) {
+		target.first = lookup;
+		target.firstMs = ms;
+		target.firstNear = search.AnsweredNear(20);
+		target.pending = 1;
+		return;
+	}
+	target.pending = 0;
+	const bool seededNow = target.runningSeeded;
+	const SDryLookup &seeded = seededNow ? lookup : target.first;
+	const SDryLookup &full = seededNow ? target.first : lookup;
+	const uint64_t seededMs = seededNow ? ms : target.firstMs;
+	const uint64_t fullMs = seededNow ? target.firstMs : ms;
+	std::vector<CSearch::SSeed> next = seededNow ? search.AnsweredNear(20) : target.firstNear;
+	const SDryComparison comparison = CompareDryLookups(seeded, full);
+	const std::set<CLookupTrace::ID> seedIDs = SeedIDs(target.seeds);
+	AddDebugLogLineN(logKadPublish,
+		CFormat("Kad seeded compare: target=%s interval=%u age=%u order=%s seeds=%u "
+			"seeds_queried=%u seeds_replied=%u seeds_stored_by_full=%u reference=%u common=%u "
+			"s_requests=%u s_queried=%u s_far=%u s_stored=%u s_recall=%u s_ms=%llu "
+			"f_requests=%u f_queried=%u f_far=%u f_stored=%u f_recall=%u f_ms=%llu "
+			"next_seeds=%u") %
+			search.GetTarget().ToHexString() % static_cast<uint32_t>(target.interval) %
+			static_cast<uint32_t>(target.roundStart - target.seedsAt) %
+			(target.seededFirst ? "seeded_first" : "full_first") %
+			static_cast<uint32_t>(seedIDs.size()) % CountIn(seedIDs, seeded.queried) %
+			CountIn(seedIDs, seeded.replied) % CountIn(seedIDs, full.stored) %
+			comparison.reference % comparison.common % seeded.requests %
+			static_cast<uint32_t>(seeded.queried.size()) % seeded.far %
+			static_cast<uint32_t>(seeded.stored.size()) % comparison.seededRecall % seededMs %
+			full.requests % static_cast<uint32_t>(full.queried.size()) % full.far %
+			static_cast<uint32_t>(full.stored.size()) % comparison.fullRecall % fullMs %
+			static_cast<uint32_t>(next.size()));
+	// Chain the seeded lookups, so drift over several rounds shows.
+	if (!next.empty()) {
+		target.seeds = std::move(next);
+	}
+	target.seedsAt = now;
+	target.due = now + target.interval;
+}
+
 void CSearchManager::JumpStart()
 {
 	RunSourceProbe();
+	RunSeedCompare();
 	// Find any searches that has stalled and jumpstart them.
 	// This will also prune all searches.
 	time_t now = time(NULL);
@@ -756,6 +925,9 @@ void CSearchManager::LogSourceProbe(const CSearch &search)
 void CSearchManager::RememberLookup(CSearch &search)
 {
 	search.RecordStoreAcknowledgements();
+	if (search.m_dryStore) {
+		RecordSeedCompare(search);
+	}
 	if (search.m_probeSize) {
 		LogSourceProbe(search);
 	}
