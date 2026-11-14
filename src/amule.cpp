@@ -428,6 +428,9 @@ int CamuleApp::OnExit()
 
 	// Destroying CDownloadQueue calls destructor for CPartFile
 	// calling CSharedFileList::SafeAddKFile occasionally.
+	if (sharedfiles) {
+		sharedfiles->SaveKeywordPublishTimes();
+	}
 	delete sharedfiles;
 	sharedfiles = NULL;
 
@@ -2558,6 +2561,7 @@ void CamuleApp::OnCoreTimer(CTimerEvent &WXUNUSED(evt))
 	if (msCur - msPrevKnownMet >= 30 * 60 * 1000 /*There must be a prefs option for this*/) {
 		// Save Shared Files data
 		knownfiles->Save();
+		sharedfiles->SaveKeywordPublishTimes();
 		msPrevKnownMet = msCur;
 	}
 

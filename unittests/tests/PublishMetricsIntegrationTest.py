@@ -119,7 +119,16 @@ def run(binary):
             else:
                 raise AssertionError('No expected Kad2 publication result:\n' + '\n'.join(lines[-100:]))
             assert ec.call(C['EC_OP_KAD_STOP'])[0] == C['EC_OP_NOOP']
-    print('PASS: Kad2 queued publication, duplicate acknowledgements and totals')
+        # Shutdown saved when each keyword is due again: a version byte, a count, then
+        # 16-byte keyword hashes as sent, each with a uint32 time about 24 h ahead.
+        saved = (root / 'kadkeywords.dat').read_bytes()
+        assert len(saved) == 5 + 20 * FILES and saved[0] == 1, saved[:5]
+        assert struct.unpack_from('<I', saved, 1)[0] == FILES, saved[:5]
+        due = {saved[5 + 20 * n:21 + 20 * n]: struct.unpack_from('<I', saved, 21 + 20 * n)[0]
+               for n in range(FILES)}
+        assert due.keys() == keywords.keys(), (sorted(due), sorted(keywords))
+        assert all(abs(t - time.time() - 24 * 3600) < 600 for t in due.values()), due
+    print('PASS: Kad2 queued publication, duplicate acknowledgements, totals and saved keyword times')
 
 
 if __name__ == '__main__':
