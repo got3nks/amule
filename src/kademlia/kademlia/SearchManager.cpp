@@ -54,6 +54,10 @@ there client on the eMule forum..
 #include "../../CompilerSpecific.h" // Needed for __FUNCTION__
 
 #include <wx/tokenzr.h>
+#include <fstream>
+#include "Kademlia.h"
+#include "../../MD4Hash.h"
+#include "../../Preferences.h"
 
 ////////////////////////////////////////
 using namespace Kademlia;
@@ -325,8 +329,68 @@ void CSearchManager::GetWords(const wxString &str, WordList *words, bool allowDu
 	}
 }
 
+namespace
+{
+bool ParseKadHex(const std::string &hex, CUInt128 &value)
+{
+	CMD4Hash bytes;
+	if (!bytes.Decode(hex)) {
+		return false;
+	}
+	value.SetValueBE(bytes.GetHash());
+	return true;
+}
+} // namespace
+
+// Diagnostic: with kadprobe.txt in the config dir ("source <id>", then "<target> <size>" lines,
+// in the hex of the publisher's log), search one listed file every 30 s and log whether the
+// source comes back, the way a downloader would look for it.
+void CSearchManager::RunSourceProbe()
+{
+	struct SProbeFile
+	{
+		CUInt128 target;
+		uint64_t size;
+	};
+	static bool loaded = false;
+	static std::vector<SProbeFile> files;
+	static CUInt128 source;
+	static size_t next = 0;
+	static time_t last = 0;
+	if (!loaded) {
+		loaded = true;
+		std::ifstream list(std::string(unicode2char(thePrefs::GetConfigDir() + "kadprobe.txt")));
+		std::string key, value;
+		while (list >> key >> value) {
+			SProbeFile file;
+			if (key == "source") {
+				ParseKadHex(value, source);
+			} else if (ParseKadHex(key, file.target)) {
+				file.size = std::stoull(value);
+				files.push_back(file);
+			}
+		}
+		if (!files.empty()) {
+			AddLogLineN(CFormat("Kad source probe: %u files") % files.size());
+		}
+	}
+	const time_t now = time(nullptr);
+	if (files.empty() || now - last < 30 || !CKademlia::IsConnected()) {
+		return;
+	}
+	last = now;
+	const SProbeFile &file = files[next++ % files.size()];
+	CSearch *search = PrepareLookup(CSearch::FILE, false, file.target);
+	if (search) {
+		search->m_probeSize = file.size;
+		search->m_probeSource = source;
+		StartSearch(search);
+	}
+}
+
 void CSearchManager::JumpStart()
 {
+	RunSourceProbe();
 	// Find any searches that has stalled and jumpstart them.
 	// This will also prune all searches.
 	time_t now = time(NULL);
@@ -643,11 +707,58 @@ void CSearchManager::CancelNodeFWCheckUDPSearch()
 namespace
 {
 std::deque<LookupSnapshot> s_recentLookups;
+
+wxString HexID(const CLookupTrace::ID &id)
+{
+	wxString hex;
+	for (const uint8_t byte : id) {
+		hex += wxString::Format("%02X", byte);
+	}
+	return hex;
+}
+} // namespace
+
+void CSearchManager::LogSourceProbe(const CSearch &search)
+{
+	// Nodes asked for sources, closest first.
+	std::vector<std::pair<CLookupTrace::ID,
+		const std::pair<const CLookupTrace::Address, CLookupTrace::Peer> *>>
+		asked;
+	uint32_t queried = 0;
+	for (const auto &peer : search.m_lookupTrace.Peers()) {
+		queried += peer.second.requests ? 1 : 0;
+		if (peer.second.itemRequests) {
+			asked.emplace_back(peer.second.distance, &peer);
+		}
+	}
+	std::sort(asked.begin(), asked.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+	uint32_t answered = 0, firstRank = 0;
+	wxString askedIDs, foundIDs;
+	for (size_t rank = 0; rank < asked.size(); ++rank) {
+		const auto &peer = *asked[rank].second;
+		answered += peer.second.results ? 1 : 0;
+		askedIDs += (askedIDs.empty() ? "" : ",") + HexID(peer.second.id);
+		if (search.m_probeHits.count(peer.first)) {
+			foundIDs += (foundIDs.empty() ? "" : ",") + HexID(peer.second.id);
+			if (!firstRank) {
+				firstRank = static_cast<uint32_t>(rank + 1);
+			}
+		}
+	}
+	AddDebugLogLineN(logKadPublish,
+		CFormat("Kad source probe: target=%s queried=%u asked=%u answered=%u found=%u "
+			"first_rank=%u results=%u asked_ids=%s found_ids=%s") %
+			search.GetTarget().ToHexString() % queried % static_cast<uint32_t>(asked.size()) %
+			answered % static_cast<uint32_t>(search.m_probeHits.size()) % firstRank %
+			search.GetAnswers() % askedIDs % foundIDs);
 }
 
 void CSearchManager::RememberLookup(CSearch &search)
 {
 	search.RecordStoreAcknowledgements();
+	if (search.m_probeSize) {
+		LogSourceProbe(search);
+	}
 
 	if (search.m_publishMeasured && theLogger.IsEnabled(logKadPublish)) {
 		CPublishMetrics::Instance().Finish(search.m_lookupTrace,

@@ -149,6 +149,8 @@ public:
 
 private:
 	static void RememberLookup(CSearch &search);
+	static void LogSourceProbe(const CSearch &search);
+	static void RunSourceProbe();
 	static void DeleteSearch(SearchMap::iterator it);
 	static void FindNode(const CUInt128 &id, bool complete);
 	static bool FindNodeSpecial(const CUInt128 &id, CKadClientSearcher *requester);

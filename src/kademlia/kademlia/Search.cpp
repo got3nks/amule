@@ -495,6 +495,7 @@ void CSearch::ProcessResponse(
 		for (ContactList::iterator it = results->begin(); it != results->end(); ++it) {
 			CContact *c = *it;
 			CUInt128 distance(c->GetClientID() ^ m_target);
+			m_lookupTrace.Mention({ c->GetIPAddress(), c->GetUDPPort() }, { fromIP, fromPort });
 
 			if (distance < fromDistance) {
 				providedCloserContacts = true;
@@ -592,25 +593,54 @@ namespace
 struct SStoredAt
 {
 	uint64_t started;
-	StoreNodes nodes;
+	SStoreSet nodes;
 };
 std::map<CUInt128, SStoredAt> s_storedAt;
 
-void LogStoreNodeOverlap(const CUInt128 &target, const CLookupTrace &trace, uint64_t started)
+wxString NodeIDs(const StoreNodes &nodes)
 {
-	StoreNodes now = AcknowledgingNodes(trace);
+	wxString ids;
+	for (const auto &node : nodes) {
+		if (!ids.empty()) {
+			ids += ',';
+		}
+		for (const uint8_t byte : node.first) {
+			ids += wxString::Format("%02X", byte);
+		}
+	}
+	return ids;
+}
+
+void LogStoreNodeOverlap(const CUInt128 &target, const CLookupTrace &trace, uint64_t started, uint64_t size)
+{
+	static bool loggedSource = false;
+	if (!loggedSource) {
+		loggedSource = true;
+		AddDebugLogLineN(logKadPublish,
+			"Kad source probe id: " + CKademlia::GetPrefs()->GetClientHash().ToHexString());
+	}
+	SStoreSet now = StoreCandidates(trace);
+	// Kad IDs only, to match against what a searcher asks.
+	AddDebugLogLineN(logKadPublish,
+		CFormat("Kad source stored at: target=%s size=%llu acked=%s spares=%s") %
+			target.ToHexString() % size % NodeIDs(now.acked) % NodeIDs(now.spares));
 	const auto previous = s_storedAt.find(target);
 	if (previous != s_storedAt.end()) {
-		const SStoreNodeOverlap overlap = CompareStoreNodes(previous->second.nodes, trace);
+		const SStoreNodeOverlap overlap = CompareStoreNodes(previous->second.nodes.acked, trace);
+		const SSpareOverlap spares = CompareSpares(previous->second.nodes, trace);
 		AddDebugLogLineN(logKadPublish,
 			CFormat("Kad source republish overlap: target=%s age=%llu previous=%u queried=%u "
-				"replied=%u acknowledged=%u moved=%u replaced=%u now=%u") %
+				"replied=%u acknowledged=%u moved=%u replaced=%u now=%u spares=%u "
+				"spares_replied=%u spares_acknowledged=%u fresh=%u fresh_referred=%u "
+				"mentions=%u") %
 				target.ToHexString() % ((started - previous->second.started) / 1000) %
 				overlap.previous % overlap.queried % overlap.replied % overlap.acknowledged %
-				overlap.moved % overlap.replaced % static_cast<uint32_t>(now.size()));
+				overlap.moved % overlap.replaced % static_cast<uint32_t>(now.acked.size()) %
+				spares.spares % spares.sparesReplied % spares.sparesAcked % spares.fresh %
+				spares.freshReferred % static_cast<uint32_t>(trace.Mentions().size()));
 	}
 	// Keep the last set that stored it, so a failed lookup is compared with that one next.
-	if (!now.empty()) {
+	if (!now.acked.empty()) {
 		s_storedAt[target] = { started, std::move(now) };
 	}
 }
@@ -622,7 +652,11 @@ void CSearch::RecordStoreAcknowledgements() const
 		return;
 	}
 	if (theLogger.IsEnabled(logKadPublish)) {
-		LogStoreNodeOverlap(m_target, m_lookupTrace, m_lookupStarted);
+		uint8_t hash[16];
+		m_target.ToByteArray(hash);
+		const CKnownFile *known = theApp->sharedfiles->GetFileByID(CMD4Hash(hash));
+		LogStoreNodeOverlap(
+			m_target, m_lookupTrace, m_lookupStarted, known ? known->GetFileSize() : 0);
 	}
 	const uint64_t acknowledged = CPublishMetrics::Acknowledged(m_lookupTrace);
 	theStats::AddPublishEvent(EPublishEvent::KadSourceStoreAcknowledged, acknowledged);
@@ -665,10 +699,11 @@ void CSearch::StorePacket()
 			uint8_t fileid[16];
 			m_target.ToByteArray(fileid);
 			CKnownFile *file = theApp->downloadqueue->GetFileByID(CMD4Hash(fileid));
-			if (file) {
+			const uint64_t size = file ? file->GetFileSize() : m_probeSize;
+			if (size) {
 				// Start position range (0x0 to 0x7FFF)
 				searchTerms.WriteUInt16(0);
-				searchTerms.WriteUInt64(file->GetFileSize());
+				searchTerms.WriteUInt64(size);
 				DebugSend(Kad2SearchSourceReq, from->GetIPAddress(), from->GetUDPPort());
 				if (from->GetVersion() >= 6) {
 					CUInt128 clientID = from->GetClientID();
@@ -1192,6 +1227,9 @@ void CSearch::ProcessResult(const CUInt128 &answer, TagPtrList *info, uint32_t f
 	switch (m_type) {
 	case FILE:
 		type = "File";
+		if (m_probeSize && answer == m_probeSource) {
+			m_probeHits.insert({ fromIP, fromPort });
+		}
 		ProcessResultFile(answer, info);
 		break;
 	case KEYWORD:

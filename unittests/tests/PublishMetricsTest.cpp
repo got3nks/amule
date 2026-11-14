@@ -155,3 +155,52 @@ TEST(PublishMetrics, StoreNodeOverlapFindsTheSameNodesAgain)
 	ASSERT_EQUALS(uint32_t(1), overlap.moved);
 	ASSERT_EQUALS(uint32_t(1), overlap.replaced);
 }
+
+TEST(PublishMetrics, SparesAndFreshNodes)
+{
+	const auto id = [](uint8_t n) {
+		CLookupTrace::ID value{};
+		value[1] = n; // Inside the store tolerance.
+		return value;
+	};
+	CLookupTrace::ID far{};
+	far[0] = 1;
+	// Nodes 1-2 stored it; 3 and 4 answered but were not stored on; 5 is outside the tolerance.
+	CLookupTrace before;
+	for (uint8_t n = 1; n <= 5; ++n) {
+		before.Query({ n, 4672 }, id(n), 0, 8, n == 5 ? far : id(n));
+		before.Reply({ n, 4672 }, 1);
+		if (n <= 2) {
+			before.ItemRequest({ n, 4672 });
+			before.ItemReply({ n, 4672 });
+		}
+	}
+	before.Query({ 9, 4672 }, id(9), 0, 8, CLookupTrace::ID{}); // Closest, but never answered.
+	const SStoreSet previous = StoreCandidates(before, 3);
+	ASSERT_EQUALS(size_t(2), previous.acked.size());
+	ASSERT_EQUALS(size_t(1), previous.spares.size()); // The closest spare fills the limit.
+	ASSERT_EQUALS(size_t(1), previous.spares.count(id(3)));
+	ASSERT_EQUALS(size_t(2), StoreCandidates(before).spares.size()); // Never node 5.
+
+	CLookupTrace after;
+	after.Query({ 3, 4672 }, id(3), 0, 8, id(3)); // The spare answers and stores it.
+	after.Reply({ 3, 4672 }, 1);
+	after.ItemRequest({ 3, 4672 });
+	after.ItemReply({ 3, 4672 });
+	after.Mention({ 6, 4672 }, { 3, 4672 }); // The spare named node 6.
+	after.Mention({ 7, 4672 }, { 8, 4672 }); // Node 7 came from a new node.
+	for (uint8_t n : { 6, 7, 8 }) {
+		after.Query({ n, 4672 }, id(n), 0, 8, id(n));
+		after.Reply({ n, 4672 }, 1);
+		if (n != 8) {
+			after.ItemRequest({ n, 4672 });
+			after.ItemReply({ n, 4672 });
+		}
+	}
+	const SSpareOverlap overlap = CompareSpares(previous, after);
+	ASSERT_EQUALS(uint32_t(1), overlap.spares);
+	ASSERT_EQUALS(uint32_t(1), overlap.sparesReplied);
+	ASSERT_EQUALS(uint32_t(1), overlap.sparesAcked);
+	ASSERT_EQUALS(uint32_t(2), overlap.fresh);         // Nodes 6 and 7.
+	ASSERT_EQUALS(uint32_t(1), overlap.freshReferred); // Only node 6.
+}

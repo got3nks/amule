@@ -242,5 +242,82 @@ inline SStoreNodeOverlap CompareStoreNodes(const StoreNodes &previous, const CLo
 	}
 	return overlap;
 }
+
+// The nodes that acknowledged, plus spares: nodes that answered inside the store tolerance
+// but were not stored on, closest first, up to `limit` nodes in all.
+struct SStoreSet
+{
+	StoreNodes acked;
+	StoreNodes spares;
+};
+
+inline SStoreSet StoreCandidates(const CLookupTrace &trace, size_t limit = 20)
+{
+	SStoreSet set;
+	set.acked = AcknowledgingNodes(trace);
+	std::vector<std::pair<CLookupTrace::ID,
+		const std::pair<const CLookupTrace::Address, CLookupTrace::Peer> *>>
+		others;
+	for (const auto &peer : trace.Peers()) {
+		// SEARCHTOLERANCE: the top 8 distance bits are zero.
+		if (!peer.second.itemReplies && peer.second.replies && peer.second.distance[0] == 0) {
+			others.emplace_back(peer.second.distance, &peer);
+		}
+	}
+	std::sort(
+		others.begin(), others.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+	for (const auto &other : others) {
+		if (set.acked.size() + set.spares.size() >= limit) {
+			break;
+		}
+		set.spares[other.second->second.id] = other.second->first;
+	}
+	return set;
+}
+
+struct SSpareOverlap
+{
+	uint32_t spares = 0;
+	uint32_t sparesReplied = 0; // Still answers a lookup.
+	uint32_t sparesAcked = 0;   // Stored it this time.
+	uint32_t fresh = 0;         // Stored it this time, in neither previous set.
+	uint32_t freshReferred = 0; // ...and a node of the previous sets pointed to it.
+};
+
+inline SSpareOverlap CompareSpares(const SStoreSet &previous, const CLookupTrace &trace)
+{
+	std::map<CLookupTrace::ID, const CLookupTrace::Peer *> byID;
+	for (const auto &peer : trace.Peers()) {
+		byID[peer.second.id] = &peer.second;
+	}
+	SSpareOverlap overlap;
+	for (const auto &spare : previous.spares) {
+		++overlap.spares;
+		const auto found = byID.find(spare.first);
+		if (found != byID.end()) {
+			overlap.sparesReplied += found->second->replies ? 1 : 0;
+			overlap.sparesAcked += found->second->itemReplies ? 1 : 0;
+		}
+	}
+	const auto known = [&previous](const CLookupTrace::ID &id) {
+		return previous.acked.count(id) || previous.spares.count(id);
+	};
+	for (const auto &peer : trace.Peers()) {
+		if (!peer.second.itemReplies || known(peer.second.id)) {
+			continue;
+		}
+		++overlap.fresh;
+		for (auto it = trace.Mentions().lower_bound({ peer.first, {} });
+			it != trace.Mentions().end() && it->first == peer.first;
+			++it) {
+			const auto source = trace.Peers().find(it->second);
+			if (source != trace.Peers().end() && known(source->second.id)) {
+				++overlap.freshReferred;
+				break;
+			}
+		}
+	}
+	return overlap;
+}
 } // namespace Kademlia
 #endif

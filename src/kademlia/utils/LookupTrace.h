@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <set>
 #include <utility>
 
 namespace Kademlia
@@ -43,6 +44,7 @@ public:
 	using ID = std::array<uint8_t, 16>;
 	static constexpr size_t MaxPeers = 128;
 	static constexpr size_t MaxEvents = 256;
+	static constexpr size_t MaxMentions = 1024;
 	struct Peer
 	{
 		ID id{};
@@ -97,6 +99,14 @@ public:
 			Record({ peer, source, tick, closer, distance });
 		}
 	}
+	// Every node that named a peer in a reply, including names the lookup already knew.
+	void Mention(Address peer, Address source)
+	{
+		if (m_mentions.size() < MaxMentions) {
+			m_mentions.emplace(peer, source);
+		}
+	}
+	const std::set<std::pair<Address, Address>> &Mentions() const { return m_mentions; }
 	void ItemRequest(Address peer)
 	{
 		auto it = m_peers.find(peer);
@@ -149,6 +159,7 @@ private:
 	}
 	std::map<Address, Peer> m_peers;
 	std::deque<Event> m_events;
+	std::set<std::pair<Address, Address>> m_mentions;
 	uint32_t m_omittedPeers = 0;
 	uint32_t m_evictedReferrals = 0;
 };

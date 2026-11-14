@@ -61,6 +61,10 @@ class CSearch
 	friend class CSearchManager;
 	bool m_publishMeasured = false;
 	bool m_publishCompleted = false;
+	// Diagnostic probe: a source search for a file we do not download, watching for one source.
+	uint64_t m_probeSize = 0;
+	CUInt128 m_probeSource;
+	std::set<CLookupTrace::Address> m_probeHits;
 
 public:
 	const CLookupTrace &GetLookupTrace() const noexcept { return m_lookupTrace; }
