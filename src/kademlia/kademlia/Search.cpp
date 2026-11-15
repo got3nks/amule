@@ -737,6 +737,9 @@ void CSearch::RecordStoreAcknowledgements() const
 	if (m_type == STOREKEYWORD) {
 		// Keyword answers, counted per node, are what end the lookup.
 		KeepPublishSeeds(GetAnswers());
+		if (theLogger.IsEnabled(logKadPublish)) {
+			LogPublishLookup(CPublishMetrics::Acknowledged(m_lookupTrace));
+		}
 		return;
 	}
 	if (m_type != STOREFILE) {
@@ -816,11 +819,13 @@ void CSearch::LogPublishLookup(uint64_t acknowledged) const
 	}
 	const uint64_t end = m_stopTick ? m_stopTick : ::GetTickCount64();
 	AddDebugLogLineN(logKadPublish,
-		CFormat("Kad publish lookup: seeded=%u seeds=%u seeds_replied=%u requests=%u queried=%u "
-			"far=%u acked=%llu ms=%llu completed=%u next=%s") %
-			(m_seeded ? 1u : 0u) % static_cast<uint32_t>(seeds.size()) % seedsReplied % requests %
-			queried % farHops % acknowledged % (end - m_lookupStarted) %
-			(m_publishCompleted ? 1u : 0u) %
+		CFormat("Kad publish lookup: type=%s seeded=%u seeds=%u seeds_replied=%u requests=%u "
+			"queried=%u far=%u acked=%llu answers=%u files=%u ms=%llu completed=%u next=%s") %
+			(m_type == STOREKEYWORD ? "keyword" : "source") % (m_seeded ? 1u : 0u) %
+			static_cast<uint32_t>(seeds.size()) % seedsReplied % requests % queried % farHops %
+			acknowledged % m_answers %
+			static_cast<uint32_t>(m_type == STOREKEYWORD ? m_fileIDs.size() : 1) %
+			(end - m_lookupStarted) % (m_publishCompleted ? 1u : 0u) %
 			(PublishSeeds().count(m_target) ? "seeded" : "full"));
 }
 
@@ -1226,6 +1231,7 @@ void CSearch::StorePacket()
 			}
 			m_storePackets++;
 		}
+		m_lookupTrace.ItemRequest({ from->GetIPAddress(), from->GetUDPPort() });
 		m_totalRequestAnswers++;
 		break;
 	}
