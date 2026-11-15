@@ -66,6 +66,10 @@ class CSearch
 	bool m_seeded = false;
 	// Store packets sent. Each gets one answer, and the answers end a publish.
 	uint32_t m_storePackets = 0;
+	// Diagnostic only: the seeds asked at the start, and when the lookup stopped.
+	std::vector<CUInt128> m_seedDistances;
+	uint64_t m_stopTick = 0;
+	void LogPublishLookup(uint64_t acknowledged) const;
 
 public:
 	const CLookupTrace &GetLookupTrace() const noexcept { return m_lookupTrace; }
