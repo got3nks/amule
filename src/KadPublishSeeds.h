@@ -63,7 +63,7 @@ constexpr const char *FileName = "kadseeds.dat";
 constexpr size_t MaxSeeds = 20;
 //! Keywords publish once a day, so their seeds are a day old when used again. Older sets have lost
 //! more nodes, and a lookup from them misses more of the closest nodes than a full lookup.
-constexpr uint32_t MaxAge = HR2S(30);
+constexpr uint32_t MaxAge = HR2S(48); // Diagnostic: 30 in the PR, to measure 30-48 h seeds.
 
 inline bool IsCurrent(const Entry &entry, uint32_t now)
 {
