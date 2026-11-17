@@ -820,12 +820,13 @@ void CSearch::LogPublishLookup(uint64_t acknowledged) const
 	}
 	const uint64_t end = m_stopTick ? m_stopTick : ::GetTickCount64();
 	AddDebugLogLineN(logKadPublish,
-		CFormat("Kad publish lookup: type=%s seeded=%u seeds=%u seeds_replied=%u requests=%u "
+		CFormat("Kad publish lookup: target=%s type=%s seeded=%u seeds=%u seeds_replied=%u "
+			"requests=%u "
 			"queried=%u far=%u acked=%llu answers=%u files=%u ms=%llu completed=%u next=%s "
 			"seed_age=%u") %
-			(m_type == STOREKEYWORD ? "keyword" : "source") % (m_seeded ? 1u : 0u) %
-			static_cast<uint32_t>(seeds.size()) % seedsReplied % requests % queried % farHops %
-			acknowledged % m_answers %
+			m_target.ToHexString() % (m_type == STOREKEYWORD ? "keyword" : "source") %
+			(m_seeded ? 1u : 0u) % static_cast<uint32_t>(seeds.size()) % seedsReplied % requests %
+			queried % farHops % acknowledged % m_answers %
 			static_cast<uint32_t>(m_type == STOREKEYWORD ? m_fileIDs.size() : 1) %
 			(end - m_lookupStarted) % (m_publishCompleted ? 1u : 0u) %
 			(PublishSeeds().count(m_target) ? "seeded" : "full") % m_seedAge);

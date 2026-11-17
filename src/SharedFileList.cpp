@@ -452,9 +452,14 @@ static bool StartKeywordPublish(CPublishKeyword *pPubKw, uint32 now)
 		delete pSearch;
 		return false;
 	}
+	const uint32 due = pPubKw->GetNextPublishTime();
 	pPubKw->SetNextPublishTime(now + KADEMLIAREPUBLISHTIMEK);
 	pPubKw->IncPublishedCount();
 	Kademlia::CSearchManager::StartSearch(pSearch);
+	// Diagnostic: due 0 means never published here, or no saved time after a restart.
+	AddDebugLogLineN(logKadPublish,
+		CFormat("Kad keyword publish attempt: target=%s files=%u due_ago=%d") %
+			pPubKw->GetKadID().ToHexString() % count % (due ? static_cast<int>(now - due) : -1));
 	return true;
 }
 
